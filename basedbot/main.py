@@ -23,6 +23,7 @@ import time
 import urllib.request
 import aiohttp
 import logging
+import markdown
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
 
@@ -66,13 +67,12 @@ FONT_URL = "https://fonts.gstatic.com/s/ebgaramond/v26/kJF1BvYxA4ggYvqAdU371t7R8
 # Structured instructions for users who use incorrect syntax
 HELP_MESSAGE = (
     "⚠️ **Incorrect Based Bot Usage!**\n\n"
-    "Here is how to use the bot correctly:\n"
-    "1️⃣ **Reply to a Text Message** with `!based <word>`\n"
+    "Here is how to use the bot correctly:\n\n"
+    "1️⃣ **Reply to a Text Message** with `!based <word>`\n\n"
     "   *(Note: <word> must match a word inside the message you reply to)*\n\n"
-    "2️⃣ **Reply to an Image Message** with `!based <caption_text>`\n"
+    "2️⃣ **Reply to an Image Message** with `!based <caption_text>`\n\n"
     "   *(This will turn that exact image into a demotivational poster)*"
 )
-
 
 # ==========================================
 # 1. Image Generation Module
@@ -591,27 +591,35 @@ class BasedMatrixBot:
             
         return None
 
-    async def send_help_reply(self, room_id: str, event_id: str, text: str):
-        """Sends a clean instruction notice replying to the sender's incorrect message."""
-        content = {
-            "body": text,
-            "msgtype": "m.notice",  # Notice type prevents feedback loop triggers with other bots
-            "m.relates_to": {
-                "m.in_reply_to": {
-                    "event_id": event_id
+    async def send_help_reply(self, room_id: str, event_id: str, message_md: str):
+            """Sends a formatted HTML notice replying to the sender's incorrect message."""
+            import markdown
+            
+            # Convert the markdown string to HTML for the Matrix client to render
+            html_body = markdown.markdown(message_md)
+            
+            content = {
+                "body": message_md,               # Plain text fallback
+                "msgtype": "m.notice",
+                "format": "org.matrix.custom.html",
+                "formatted_body": html_body,      # This enables the bold/icons/etc
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        "event_id": event_id
+                    }
                 }
             }
-        }
-        try:
-            resp = await self.client.room_send(
-                room_id=room_id,
-                message_type="m.room.message",
-                content=content
-            )
-            if not isinstance(resp, RoomSendResponse):
-                print(f"[!] Failed to send helper syntax reply to room {room_id}: {getattr(resp, 'message', 'Unknown error')}")
-        except Exception as e:
-            print(f"[!] Exception raised while sending help reply: {e}")
+            
+            try:
+                resp = await self.client.room_send(
+                    room_id=room_id,
+                    message_type="m.room.message",
+                    content=content
+                )
+                if not isinstance(resp, RoomSendResponse):
+                    print(f"[!] Failed to send help reply: {getattr(resp, 'message', 'Unknown error')}")
+            except Exception as e:
+                print(f"[!] Exception raised while sending help reply: {e}")
 
     async def handle_message(self, room: MatrixRoom, event: RoomMessageText):
         """Processes incoming room messages."""

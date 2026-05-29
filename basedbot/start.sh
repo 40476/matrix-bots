@@ -44,7 +44,7 @@ fi
 # Upgrade pip and install all necessary dependencies
 echo "[*] Checking and updating dependencies..."
 pip install --upgrade pip
-pip install matrix-nio Pillow aiohttp
+pip install matrix-nio Pillow aiohttp markdown
 
 # Run the bot
 echo "[*] Starting the Matrix Based Bot..."
