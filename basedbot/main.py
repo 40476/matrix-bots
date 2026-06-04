@@ -397,8 +397,8 @@ def generate_based_meme(
                 print(f"[Meme Gen] Avatar compositing failed: {e}")
                 
         if not avatar_rendered:
-            # Draw an elegant geometric circle outline as fallback avatar
-            draw.ellipse([pfp_x, pfp_y, pfp_x + pfp_size, pfp_y + pfp_size], fill="#4f545c", outline="white", width=2)
+            # Draw the standard "Blank User" silhouette
+            draw_blank_avatar(draw, pfp_x, pfp_y, pfp_size, bg_color="#1e1e1e", fg_color="#4a4f56")
             
         # Render sender username/id
         username = sender_id if sender_id else "UNKNOWN USER"
@@ -439,13 +439,89 @@ def generate_based_meme(
 
 
 def draw_placeholder(draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: int):
-    """Draws a clean, dark-gray background silhouette when no PFP is available."""
-    draw.rectangle([x1, y1, x2, y2], fill="#1e1e1e")
-    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    # Simple geometry representation
-    draw.ellipse([cx - 40, cy - 60, cx + 40, cy + 20], fill="#3e3e3e")
-    draw.ellipse([cx - 80, cy + 40, cx + 80, cy + 140], fill="#3e3e3e")
-
+    """Draws a 'No Image / Broken Image' icon centered in the frame."""
+    # Colors
+    bg_col = "#1e1e1e"
+    frame_col = "#4a4f56"
+    icon_col = "#6b7078"
+    accent_col = "#8a8f96"
+    slash_col = "#ff4444"
+    
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    w = x2 - x1
+    h = y2 - y1
+    
+    # Scale factor
+    s = min(w, h) * 0.35
+    
+    # 1. Background
+    draw.rectangle([x1, y1, x2, y2], fill=bg_col)
+    
+    # 2. Photo Frame
+    fw, fh = s * 1.6, s
+    fx1, fy1 = cx - fw // 2, cy - fh // 2
+    fx2, fy2 = fx1 + fw, fy1 + fh
+    line_w = max(2, int(s * 0.03))
+    draw.rectangle([fx1, fy1, fx2, fy2], outline=frame_col, width=line_w)
+    
+    # 3. Mountain Silhouette
+    pad = max(2, int(s * 0.05))
+    mountain_points = [
+        (fx2 - pad, fy2 - pad),                    # Bottom Right
+        (fx1 + pad, fy2 - pad),                    # Bottom Left
+        (cx - int(fw * 0.2), fy1 + int(fh * 0.4)), # Left Peak
+        (cx, fy1 + pad),                           # Center High Peak
+        (cx + int(fw * 0.25), fy1 + int(fh * 0.35)),# Right Peak
+    ]
+    draw.polygon(mountain_points, fill=icon_col, outline=frame_col)
+    
+    # 4. Sun
+    sun_r = int(s * 0.15)
+    sun_x = fx2 - pad - sun_r
+    sun_y = fy1 + pad + sun_r
+    draw.ellipse([sun_x - sun_r, sun_y - sun_r, sun_x + sun_r, sun_y + sun_r], fill=accent_col, outline=frame_col)
+    
+    # 5. Red Diagonal Slash (Broken Image Indicator)
+    slash_w = max(3, int(s * 0.04))
+    draw.line([fx1, fy2, fx2, fy1], fill=slash_col, width=slash_w)
+    
+def draw_blank_avatar(draw: ImageDraw.ImageDraw, x: int, y: int, size: int, bg_color: str = "#1e1e1e", fg_color: str = "#4a4f56"):
+    """
+    Draws a standard 'blank profile' silhouette (head + shoulders) 
+    centered inside a circular boundary at (x, y) with diameter `size`.
+    """
+    cx = x + size // 2
+    cy = y + size // 2
+    radius = size // 2
+    
+    # 1. Draw the circular background "frame"
+    draw.ellipse([x, y, x + size, y + size], fill=bg_color, outline="#3a3f44", width=2)
+    
+    # 2. Draw Head (Circle) - Centered horizontally, slightly above vertical center
+    head_radius = int(size * 0.25)
+    head_cy = cy - int(size * 0.1)
+    draw.ellipse(
+        [cx - head_radius, head_cy - head_radius, cx + head_radius, head_cy + head_radius], 
+        fill=fg_color
+    )
+    
+    # 3. Draw Shoulders (Rounded Rectangle / Trapezoid approximation using chords)
+    # Shoulders span ~70% of avatar width, start below head
+    shoulder_width = int(size * 0.65)
+    shoulder_top = head_cy + head_radius + int(size * 0.02)
+    shoulder_bottom = y + size - int(size * 0.1) # Near bottom of circle
+    
+    # We draw a polygon for the shoulders: top-left, top-right, bottom-right, bottom-left
+    # Bottom corners tucked inside the circle boundary
+    margin_bottom = int(size * 0.1)
+    points = [
+        (cx - shoulder_width // 2, shoulder_top),      # Top Left
+        (cx + shoulder_width // 2, shoulder_top),      # Top Right
+        (cx + shoulder_width // 2 - int(size*0.05), y + size - margin_bottom), # Bottom Right (tucked in)
+        (cx - shoulder_width // 2 + int(size*0.05), y + size - margin_bottom), # Bottom Left (tucked in)
+    ]
+    draw.polygon(points, fill=fg_color)
 
 def draw_centered_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, cx: int, cy: int):
     """Positions text centered perfectly on (cx, cy)."""
