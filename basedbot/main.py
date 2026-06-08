@@ -3,8 +3,9 @@
 Matrix Based Bot
 ================
 A Matrix bot that listens for "!based <text>" replies, validates that the <text>
-matches (case-insensitively) the message being replied to, downloads the target's
-profile picture, and generates a single-frame demotivational style meme.
+matches (case-insensitively) the message being replied to (with at most 1 word
+added or removed, and ignoring emojis), downloads the target's profile picture,
+and generates a single-frame demotivational style meme.
 
 If the replied-to message is an image, it skips the text match and uses the
 replied-to image instead of the user's profile picture.
@@ -24,7 +25,7 @@ import urllib.request
 import aiohttp
 import logging
 import markdown
-from typing import Optional
+from typing import Optional, List, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 # Import matrix-nio components
@@ -59,17 +60,22 @@ SESSION_PATH = "session.json"
 
 # Local font storage path in user's home directory
 FONT_DIR = os.path.expanduser("~/.local/share/basedbot")
-FONT_PATH = os.path.join(FONT_DIR, "ebgaramond.ttf")
+FONT_SERIF_PATH = os.path.join(FONT_DIR, "ebgaramond.ttf")
+FONT_SANS_PATH = os.path.join(FONT_DIR, "notosans.ttf")
+FONT_EMOJI_PATH = os.path.join(FONT_DIR, "notoemoji.ttf")
 
-# Direct permanent Google Fonts CDN link to ensure no 404/redirect errors occur
-FONT_URL = "https://fonts.gstatic.com/s/ebgaramond/v26/kJF1BvYxA4ggYvqAdU371t7R83fufXpS.ttf"
+# Highly stable Font source URLs from the official Google Fonts repository (direct raw downloads)
+URL_SERIF = "https://github.com/google/fonts/raw/main/ofl/ebgaramond/static/EBGaramond-Regular.ttf"
+URL_SANS = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf"
+# Switch to Pillow-compatible vector-based monochrome Noto Emoji
+URL_EMOJI = "https://github.com/google/fonts/raw/refs/heads/main/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf"
 
 # Structured instructions for users who use incorrect syntax
 HELP_MESSAGE = (
     "⚠️ **Incorrect Based Bot Usage!**\n\n"
     "Here is how to use the bot correctly:\n\n"
     "1️⃣ **Reply to a Text Message** with `!based <word>`\n\n"
-    "   *(Note: <word> must match a word inside the message you reply to)*\n\n"
+    "   *(Note: <word> must match a word inside the message you reply to with at most 1 word difference)*\n\n"
     "2️⃣ **Reply to an Image Message** with `!based <caption_text>`\n\n"
     "   *(This will turn that exact image into a demotivational poster)*"
 )
@@ -78,169 +84,194 @@ HELP_MESSAGE = (
 # 1. Image Generation Module
 # ==========================================
 
-def ensure_font_installed():
-    """
-    Checks if the local custom font is present in the local directory.
-    If not, downloads it directly from the official public source.
-    """
-    if os.path.exists(FONT_PATH):
-        return True
-
-    print(f"[*] Local serif font not found. Preparing directory: {FONT_DIR}")
+def download_file(url: str, dest_path: str):
+    """Utility helper to download any file to a target destination."""
     try:
-        os.makedirs(FONT_DIR, exist_ok=True)
-        print(f"[*] Downloading book-like serif font from Google Fonts (CDN)...")
-        
-        # User-Agent header to prevent generic request blocks
         req = urllib.request.Request(
-            FONT_URL, 
+            url, 
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         )
-        
-        with urllib.request.urlopen(req, timeout=15) as response, open(FONT_PATH, "wb") as out_file:
+        with urllib.request.urlopen(req, timeout=20) as response, open(dest_path, "wb") as out_file:
             out_file.write(response.read())
-            
-        print(f"[+] Font downloaded successfully and saved to: {FONT_PATH}")
-        return True
+        print(f"[+] Downloaded: {dest_path}")
     except Exception as e:
-        print(f"[!] Error downloading custom font: {e}")
-        return False
+        print(f"[!] Error downloading {url}: {e}")
+
+def ensure_font_installed():
+    """
+    Checks if all required custom fonts are present in the local directory.
+    If not, downloads them directly from official public sources.
+    """
+    os.makedirs(FONT_DIR, exist_ok=True)
+    
+    if not os.path.exists(FONT_SERIF_PATH):
+        print("[*] Downloading Serif Font...")
+        download_file(URL_SERIF, FONT_SERIF_PATH)
+        
+    if not os.path.exists(FONT_SANS_PATH):
+        print("[*] Downloading Multilingual Sans Font...")
+        download_file(URL_SANS, FONT_SANS_PATH)
+        
+    if not os.path.exists(FONT_EMOJI_PATH):
+        print("[*] Downloading Emoji Font...")
+        download_file(URL_EMOJI, FONT_EMOJI_PATH)
+
+    return True
 
 
-def find_serif_font(size: int) -> ImageFont.ImageFont:
+def is_combining_or_modifier(char: str) -> bool:
     """
-    Attempts to locate the automatically downloaded local serif font first.
-    Falls back to system fonts or the default system font if unavailable.
+    Identifies zero-width joiners, skin tone modifiers, and variation selectors
+    that should inherit the font classification of their parent character run.
     """
-    # 1. Prioritize the auto-downloaded custom serif font
-    if os.path.exists(FONT_PATH):
+    code = ord(char)
+    # Variation Selectors
+    if 0xFE00 <= code <= 0xFE0F:
+        return True
+    # Zero Width Joiner (ZWJ)
+    if code == 0x200D:
+        return True
+    # Fitzpatrick Skin Tone Modifiers
+    if 0x1F3FB <= code <= 0x1F3FF:
+        return True
+    # Combining Diacritical Marks
+    if 0x0300 <= code <= 0x036F:
+        return True
+    return False
+
+
+def get_font_for_char(char: str, size: int) -> Tuple[ImageFont.ImageFont, bool]:
+    """
+    Analyzes a character and returns the best matching font and a boolean 
+    representing whether it requires fallback rendering.
+    """
+    code = ord(char)
+    
+    # 1. Emoji / Pictographs / Emoticons
+    if (0x1F300 <= code <= 0x1F9FF) or (0x2600 <= code <= 0x27BF) or (0x1F600 <= code <= 0x1F64F):
+        if os.path.exists(FONT_EMOJI_PATH):
+            try:
+                return ImageFont.truetype(FONT_EMOJI_PATH, size), True
+            except Exception:
+                pass
+                
+    # 2. General non-Latin Unicode / Multilingual scripts
+    elif code > 127:
+        if os.path.exists(FONT_SANS_PATH):
+            try:
+                return ImageFont.truetype(FONT_SANS_PATH, size), False
+            except Exception:
+                pass
+                
+    # 3. Default Latin / Serif Text
+    if os.path.exists(FONT_SERIF_PATH):
         try:
-            return ImageFont.truetype(FONT_PATH, size)
+            return ImageFont.truetype(FONT_SERIF_PATH, size), False
         except Exception:
             pass
+            
+    return ImageFont.load_default(), False
 
-    # 2. Hardcoded fallback list for standard systems
-    font_paths = [
-        # Windows (Georgia Regular, Times New Roman Regular)
-        "C:\\Windows\\Fonts\\georgia.ttf",
-        "C:\\Windows\\Fonts\\times.ttf",
-        "C:\\Windows\\Fonts\\georgiab.ttf",
-        "C:\\Windows\\Fonts\\timesbd.ttf",
-        # Linux / VPS (Ubuntu/Debian)
-        "/usr/share/fonts/truetype/msttcorefonts/Georgia.ttf",
-        "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-        # macOS
-        "/System/Library/Fonts/Supplemental/Georgia.ttf",
-        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-        "/Library/Fonts/Georgia.ttf",
-        "/Library/Fonts/Times New Roman.ttf",
-    ]
+
+def segment_text(text: str, size: int) -> List[Tuple[str, ImageFont.ImageFont, bool]]:
+    """
+    Splits text into consecutive runs of characters sharing the exact same font mapping
+    to maintain pristine typesetting/kerning performance in PIL.
+    """
+    if not text:
+        return []
+        
+    segments = []
+    current_run = []
+    current_font, current_is_emoji = get_font_for_char(text[0], size)
     
-    for path in font_paths:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
-                
-    # 3. Dynamic search in standard system directories if still missing
-    system_font_dirs = ["/usr/share/fonts", "/usr/local/share/fonts", "~/.local/share/fonts"]
-    for s_dir in system_font_dirs:
-        expanded_dir = os.path.expanduser(s_dir)
-        if os.path.exists(expanded_dir):
-            for root, _, files in os.walk(expanded_dir):
-                for file in files:
-                    if file.lower().endswith((".ttf", ".otf")):
-                        full_path = os.path.join(root, file)
-                        if any(x in file.lower() for x in ["serif", "times", "georgia", "liberation", "dejavu"]):
-                            try:
-                                return ImageFont.truetype(full_path, size)
-                            except Exception:
-                                pass
-                                
-    # Grab literally any scalable font we can find if no serifs exist
-    for s_dir in system_font_dirs:
-        expanded_dir = os.path.expanduser(s_dir)
-        if os.path.exists(expanded_dir):
-            for root, _, files in os.walk(expanded_dir):
-                for file in files:
-                    if file.lower().endswith((".ttf", ".otf")):
-                        try:
-                            return ImageFont.truetype(os.path.join(root, file), size)
-                        except Exception:
-                            pass
-
-    # Safe fallback if no system fonts are installed (this default font will not scale!)
-    try:
-        return ImageFont.load_default()
-    except Exception:
-        return None
+    for char in text:
+        # If the character is an emoji modifier, retain parent font properties
+        if is_combining_or_modifier(char):
+            font = current_font
+            is_emoji = current_is_emoji
+        else:
+            font, is_emoji = get_font_for_char(char, size)
+            
+        # Check if the font configuration has changed
+        if font == current_font and is_emoji == current_is_emoji:
+            current_run.append(char)
+        else:
+            segments.append(("".join(current_run), current_font, current_is_emoji))
+            current_run = [char]
+            current_font = font
+            current_is_emoji = is_emoji
+            
+    if current_run:
+        segments.append(("".join(current_run), current_font, current_is_emoji))
+        
+    return segments
 
 
-def get_autoscaled_font(text: str, max_width: int, max_height: int) -> ImageFont.ImageFont:
-    """
-    Dynamically scales the book-style serif font down from a maximum size
-    until the rendered text bounding box fits within the specified limits.
-    """
+def measure_mixed_text(text: str, size: int) -> Tuple[int, int]:
+    """Calculates the total width and height of a mixed unicode/emoji string."""
+    segments = segment_text(text, size)
+    total_width = 0
+    max_height = 0
+    
+    # We use a dummy canvas to measure
     temp_img = Image.new("RGB", (1, 1))
     temp_draw = ImageDraw.Draw(temp_img)
     
-    # Start with a prominent headline size and scale down
+    for run, font, _ in segments:
+        if hasattr(temp_draw, "textbbox"):
+            bbox = temp_draw.textbbox((0, 0), run, font=font)
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+        else:
+            w, h = temp_draw.textsize(run, font=font)
+        total_width += w
+        if h > max_height:
+            max_height = h
+            
+    return total_width, max_height
+
+
+def draw_mixed_text(draw: ImageDraw.ImageDraw, text: str, size: int, start_x: int, y: int, fill_color: str = "white"):
+    """Draws a line of mixed unicode/emoji text starting from start_x."""
+    segments = segment_text(text, size)
+    current_x = start_x
+    
+    for run, font, is_emoji in segments:
+        color = fill_color
+        # Draw the current run
+        draw.text((current_x, y), run, font=font, fill=color)
+        
+        # Increment X offset by the run's width
+        if hasattr(draw, "textbbox"):
+            bbox = draw.textbbox((0, 0), run, font=font)
+            w = bbox[2] - bbox[0]
+        else:
+            w, _ = draw.textsize(run, font=font)
+        current_x += w
+
+
+def get_autoscaled_font_size(text: str, max_width: int, max_height: int) -> int:
+    """Finds the largest possible font size that allows the entire line to fit."""
     size = 100
     while size > 12:
-        font = find_serif_font(size)
-        if not font:
-            size -= 2
-            continue
-            
-        # If we had to fall back to the built-in unscalable Pillow font, stop trying to scale
-        if font.__class__.__name__ == "ImageDefaultFont":
-            print("[!] Warning: No TrueType system fonts detected on VPS! Text scaling is disabled.")
-            return font
-            
-        # Compute dimensions of text under current font size
-        if hasattr(temp_draw, "textbbox"):
-            bbox = temp_draw.textbbox((0, 0), text, font=font)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-        else:
-            text_w, text_h = temp_draw.textsize(text, font=font)
-            
-        # If it fits within our padding limits, return this font size
-        if text_w <= max_width and text_h <= max_height:
-            return font
-            
+        w, h = measure_mixed_text(text, size)
+        if w <= max_width and h <= max_height:
+            return size
         size -= 2
-        
-    return find_serif_font(12)
+    return 12
 
 
-def wrap_text(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
-    """
-    Utility helper to split a line of text into wrapped segments that cleanly
-    fit within a given width limit in pixels.
-    """
+def wrap_text_mixed(text: str, font_size: int, max_width: int) -> list[str]:
+    """Splits a line of text containing mixed unicode characters/emojis into wrapped lines."""
     lines = []
     words = text.split(" ")
     current_line = []
     
-    # Create temporary measurement context
-    temp_img = Image.new("RGB", (1, 1))
-    temp_draw = ImageDraw.Draw(temp_img)
-    
     for word in words:
         test_line = " ".join(current_line + [word]) if current_line else word
+        w, _ = measure_mixed_text(test_line, font_size)
         
-        if hasattr(temp_draw, "textbbox"):
-            bbox = temp_draw.textbbox((0, 0), test_line, font=font)
-            w = bbox[2] - bbox[0]
-        else:
-            w, _ = temp_draw.textsize(test_line, font=font)
-            
         if w <= max_width:
             current_line.append(word)
         else:
@@ -254,35 +285,103 @@ def wrap_text(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]
     return lines
 
 
+# ==========================================
+# Word-Level Approximate Matcher Module
+# ==========================================
+
+def strip_emojis(text: str) -> str:
+    """Removes all emojis and special pictographs from a string for accurate word comparisons."""
+    emoji_pattern = re.compile(
+        "["
+        "\U0001f600-\U0001f64f"  # emoticons
+        "\U0001f300-\U0001f5ff"  # symbols & pictographs
+        "\U0001f680-\U0001f6ff"  # transport & map symbols
+        "\U0001f1e0-\U0001f1ff"  # flags (iOS)
+        "\U00002700-\U000027bf"  # dingbats
+        "\U00002600-\U000026ff"  # misc symbols
+        "\U0001f900-\U0001f9ff"  # supplemental symbols/pictographs
+        "\U0001f004-\U0001f0cf"  # Mahjong / Domino tiles etc.
+        "\U0000200d"             # Zero-width joiner
+        "]+", flags=re.UNICODE
+    )
+    return emoji_pattern.sub(r'', text)
+
+
+def clean_and_tokenize(text: str) -> list[str]:
+    """Strips emojis and returns an ordered list of lowercase alphanumeric words."""
+    no_emoji = strip_emojis(text)
+    # Extracts words, ignoring punctuation
+    words = re.findall(r'\b\w+\b', no_emoji.lower())
+    return words
+
+
+def word_edit_distance(s1: list[str], s2: list[str]) -> int:
+    """Calculates word-level Levenshtein edit distance between two token lists."""
+    m, n = len(s1), len(s2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+        
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if s1[i-1] == s2[j-1]:
+                dp[i][j] = dp[i-1][j-1]
+            else:
+                dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+    return dp[m][n]
+
+
+def is_approximate_match(parent_body: str, query_text: str) -> bool:
+    """
+    Checks if the query_text can be matched to any part of parent_body with
+    at most one word added or removed (ignoring case, punctuation, and emojis).
+    """
+    parent_words = clean_and_tokenize(parent_body)
+    query_words = clean_and_tokenize(query_text)
+    
+    # If the user only reacted with emojis, allow the match to pass through
+    if not query_words:
+        return True
+        
+    len_q = len(query_words)
+    
+    # We check slices of length (len_q - 1), len_q, and (len_q + 1)
+    for l in (len_q - 1, len_q, len_q + 1):
+        if l < 1:
+            continue
+        for i in range(len(parent_words) - l + 1):
+            subsegment = parent_words[i : i + l]
+            # If word edit distance is <= 1, then the word sequence matches!
+            if word_edit_distance(subsegment, query_words) <= 1:
+                return True
+                
+    return False
+
+
 def generate_based_meme(
     image_bytes: Optional[bytes], 
     caption: str,
     is_image_mode: bool = False,
-    sender_id: Optional[str] = None,
+    sender_display_name: Optional[str] = None,
     message_body: Optional[str] = None
 ) -> io.BytesIO:
     """
     Generates a single-frame demotivational style black-box image.
-    
-    - Image dimensions: 800x600
-    - If is_image_mode is True, draws the image directly in the inner box frame.
-    - If is_image_mode is False, renders a beautiful, clean chat card with circular PFP,
-      the user ID, and the full text message beautifully wrapped.
-    - Only text at the bottom is the input caption, centered, capitalized.
     """
-    # Create black canvas
     width, height = 800, 600
     img = Image.new("RGB", (width, height), color="black")
     draw = ImageDraw.Draw(img)
     
-    # Define a single inner frame box for the target (Enlarged to fill the box layout better)
+    # Define a single inner frame box for the target
     box_x1, box_y1 = 80, 40
     box_x2, box_y2 = 720, 450
     
     # Draw the white frame boundary outline
     draw.rectangle([box_x1, box_y1, box_x2, box_y2], outline="white", width=4)
     
-    # Coordinates inside the frame boundary (offset slightly inside the frame line)
+    # Coordinates inside the frame boundary
     img_x1, img_y1 = box_x1 + 4, box_y1 + 4
     img_x2, img_y2 = box_x2 - 4, box_y2 - 4
     img_w = img_x2 - img_x1
@@ -296,18 +395,16 @@ def generate_based_meme(
             try:
                 pfp_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
                 
-                # Fit/contain the image inside the frame box (avoids cropping crucial portions)
+                # Fit/contain the image inside the frame box
                 pfp_ratio = pfp_img.width / pfp_img.height
                 target_ratio = img_w / img_h
                 
                 if pfp_ratio > target_ratio:
-                    # Image is wider than target frame: fit to width, pad top/bottom
                     new_w = img_w
                     new_h = int(img_w / pfp_ratio)
                     offset_x = 0
                     offset_y = (img_h - new_h) // 2
                 else:
-                    # Image is taller than target frame: fit to height, pad sides
                     new_h = img_h
                     new_w = int(img_h * pfp_ratio)
                     offset_x = (img_w - new_w) // 2
@@ -335,22 +432,9 @@ def generate_based_meme(
         
         body_text = message_body if message_body else ""
         
-        # -------------------------------------------------------------
-        # Proportional Dynamic Layout Algorithm
-        # -------------------------------------------------------------
-        # Start with a very large text size and scale everything (avatar size,
-        # margins, and paddings) down together until the whole composition
-        # fits and fills the maximum size of the box beautifully.
+        # Start with a very large text size and scale down as needed
         body_font_size = 36
         while body_font_size > 12:
-            body_font = find_serif_font(body_font_size)
-            if not body_font:
-                body_font_size -= 2
-                continue
-                
-            user_font_size = int(body_font_size * 1.1)
-            user_font = find_serif_font(user_font_size)
-            
             pfp_size = int(body_font_size * 3.2)
             pfp_padding = int(body_font_size * 0.9)
             
@@ -362,33 +446,31 @@ def generate_based_meme(
             available_width = img_x2 - text_x - pfp_padding
             
             # Wrap text inside the dynamic bounds
-            wrapped_lines = wrap_text(body_text, body_font, available_width)
+            wrapped_lines = wrap_text_mixed(body_text, body_font_size, available_width)
             
-            # Calculate the final combined height of Username and Body lines
+            # Calculate height
+            user_font_size = int(body_font_size * 1.1)
             line_height = body_font_size + int(body_font_size * 0.3)
             total_text_height = user_font_size + 16 + (len(wrapped_lines) * line_height)
             
-            # Limit height to the actual inner bounds minus layout padding
             max_available_height = img_h - (pfp_padding * 2)
-            
             if total_text_height <= max_available_height:
                 break
                 
             body_font_size -= 2
 
-        # Draw circular profile picture avatar on the top-left using calculated proportions
+        # Draw circular profile picture avatar
         avatar_rendered = False
         if image_bytes:
             try:
                 pfp_raw = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
                 pfp_resized = pfp_raw.resize((pfp_size, pfp_size), Image.Resampling.LANCZOS)
                 
-                # Create mask for circular avatar cropping
+                # Circular mask
                 mask = Image.new("L", (pfp_size, pfp_size), 0)
                 mask_draw = ImageDraw.Draw(mask)
                 mask_draw.ellipse([0, 0, pfp_size, pfp_size], fill=255)
                 
-                # Composite avatar beautifully with card background
                 pfp_canvas = Image.new("RGBA", (pfp_size, pfp_size), card_bg)
                 pfp_canvas.paste(pfp_resized, (0, 0), mask)
                 img.paste(pfp_canvas.convert("RGB"), (pfp_x, pfp_y))
@@ -397,22 +479,21 @@ def generate_based_meme(
                 print(f"[Meme Gen] Avatar compositing failed: {e}")
                 
         if not avatar_rendered:
-            # Draw the standard "Blank User" silhouette
             draw_blank_avatar(draw, pfp_x, pfp_y, pfp_size, bg_color="#1e1e1e", fg_color="#4a4f56")
             
-        # Render sender username/id
-        username = sender_id if sender_id else "UNKNOWN USER"
-        draw.text((text_x, text_y), username, font=user_font, fill="#e4e6eb")
+        # Render sender pretty display name
+        username = sender_display_name if sender_display_name else "UNKNOWN USER"
+        user_font_size = int(body_font_size * 1.1)
+        draw_mixed_text(draw, username, user_font_size, text_x, text_y, fill_color="#e4e6eb")
         
         # Draw wrapped lines onto the canvas card context
         current_y = text_y + user_font_size + 16
+        line_height = body_font_size + int(body_font_size * 0.3)
         for line in wrapped_lines:
-            # Check if text is overflowing the bottom card bounds
             if current_y + body_font_size > img_y2 - 12:
-                # Append ellipsis marker to denote overflow
-                draw.text((text_x, current_y), "... [TRUNCATED]", font=body_font, fill="#888a8e")
+                draw_mixed_text(draw, "... [TRUNCATED]", body_font_size, text_x, current_y, fill_color="#888a8e")
                 break
-            draw.text((text_x, current_y), line, font=body_font, fill="#b9bbbe")
+            draw_mixed_text(draw, line, body_font_size, text_x, current_y, fill_color="#b9bbbe")
             current_y += line_height
 
     # -------------------------------------------------------------
@@ -421,15 +502,21 @@ def generate_based_meme(
     text_content = caption.upper()
     
     # Safe boundaries for bottom text to prevent running off the frame
-    max_text_width = 720  # 800 - 80px total padding (40px on left/right)
-    max_text_height = 80  # Height boundary for the footer area
+    max_text_width = 720  
+    max_text_height = 80  
     
     # Fetch font dynamically scaled to fit
-    font = get_autoscaled_font(text_content, max_text_width, max_text_height)
+    font_size = get_autoscaled_font_size(text_content, max_text_width, max_text_height)
     
     # Position text centering below the box (centered between y=450 and y=600)
     text_y_center = 525
-    draw_centered_text(draw, text_content, font, width // 2, text_y_center)
+    total_w, total_h = measure_mixed_text(text_content, font_size)
+    
+    # Centering math
+    start_x = (width - total_w) // 2
+    start_y = text_y_center - (total_h // 2)
+    
+    draw_mixed_text(draw, text_content, font_size, start_x, start_y, fill_color="white")
     
     # Output image buffer
     output = io.BytesIO()
@@ -440,7 +527,6 @@ def generate_based_meme(
 
 def draw_placeholder(draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: int):
     """Draws a 'No Image / Broken Image' icon centered in the frame."""
-    # Colors
     bg_col = "#1e1e1e"
     frame_col = "#4a4f56"
     icon_col = "#6b7078"
@@ -452,37 +538,30 @@ def draw_placeholder(draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: i
     w = x2 - x1
     h = y2 - y1
     
-    # Scale factor
     s = min(w, h) * 0.35
-    
-    # 1. Background
     draw.rectangle([x1, y1, x2, y2], fill=bg_col)
     
-    # 2. Photo Frame
     fw, fh = s * 1.6, s
     fx1, fy1 = cx - fw // 2, cy - fh // 2
     fx2, fy2 = fx1 + fw, fy1 + fh
     line_w = max(2, int(s * 0.03))
     draw.rectangle([fx1, fy1, fx2, fy2], outline=frame_col, width=line_w)
     
-    # 3. Mountain Silhouette
     pad = max(2, int(s * 0.05))
     mountain_points = [
-        (fx2 - pad, fy2 - pad),                    # Bottom Right
-        (fx1 + pad, fy2 - pad),                    # Bottom Left
-        (cx - int(fw * 0.2), fy1 + int(fh * 0.4)), # Left Peak
-        (cx, fy1 + pad),                           # Center High Peak
-        (cx + int(fw * 0.25), fy1 + int(fh * 0.35)),# Right Peak
+        (fx2 - pad, fy2 - pad),                    
+        (fx1 + pad, fy2 - pad),                    
+        (cx - int(fw * 0.2), fy1 + int(fh * 0.4)), 
+        (cx, fy1 + pad),                           
+        (cx + int(fw * 0.25), fy1 + int(fh * 0.35)),
     ]
     draw.polygon(mountain_points, fill=icon_col, outline=frame_col)
     
-    # 4. Sun
     sun_r = int(s * 0.15)
     sun_x = fx2 - pad - sun_r
     sun_y = fy1 + pad + sun_r
     draw.ellipse([sun_x - sun_r, sun_y - sun_r, sun_x + sun_r, sun_y + sun_r], fill=accent_col, outline=frame_col)
     
-    # 5. Red Diagonal Slash (Broken Image Indicator)
     slash_w = max(3, int(s * 0.04))
     draw.line([fx1, fy2, fx2, fy1], fill=slash_col, width=slash_w)
     
@@ -493,12 +572,8 @@ def draw_blank_avatar(draw: ImageDraw.ImageDraw, x: int, y: int, size: int, bg_c
     """
     cx = x + size // 2
     cy = y + size // 2
-    radius = size // 2
-    
-    # 1. Draw the circular background "frame"
     draw.ellipse([x, y, x + size, y + size], fill=bg_color, outline="#3a3f44", width=2)
     
-    # 2. Draw Head (Circle) - Centered horizontally, slightly above vertical center
     head_radius = int(size * 0.25)
     head_cy = cy - int(size * 0.1)
     draw.ellipse(
@@ -506,35 +581,16 @@ def draw_blank_avatar(draw: ImageDraw.ImageDraw, x: int, y: int, size: int, bg_c
         fill=fg_color
     )
     
-    # 3. Draw Shoulders (Rounded Rectangle / Trapezoid approximation using chords)
-    # Shoulders span ~70% of avatar width, start below head
     shoulder_width = int(size * 0.65)
     shoulder_top = head_cy + head_radius + int(size * 0.02)
-    shoulder_bottom = y + size - int(size * 0.1) # Near bottom of circle
-    
-    # We draw a polygon for the shoulders: top-left, top-right, bottom-right, bottom-left
-    # Bottom corners tucked inside the circle boundary
     margin_bottom = int(size * 0.1)
     points = [
-        (cx - shoulder_width // 2, shoulder_top),      # Top Left
-        (cx + shoulder_width // 2, shoulder_top),      # Top Right
-        (cx + shoulder_width // 2 - int(size*0.05), y + size - margin_bottom), # Bottom Right (tucked in)
-        (cx - shoulder_width // 2 + int(size*0.05), y + size - margin_bottom), # Bottom Left (tucked in)
+        (cx - shoulder_width // 2, shoulder_top),      
+        (cx + shoulder_width // 2, shoulder_top),      
+        (cx + shoulder_width // 2 - int(size*0.05), y + size - margin_bottom), 
+        (cx - shoulder_width // 2 + int(size*0.05), y + size - margin_bottom), 
     ]
     draw.polygon(points, fill=fg_color)
-
-def draw_centered_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, cx: int, cy: int):
-    """Positions text centered perfectly on (cx, cy)."""
-    if hasattr(draw, "textbbox"):
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-    else:
-        text_w, text_h = draw.textsize(text, font=font)
-        
-    x = cx - (text_w // 2)
-    y = cy - (text_h // 2)
-    draw.text((x, y), text, font=font, fill="white")
 
 
 # ==========================================
@@ -606,7 +662,6 @@ class BasedMatrixBot:
 
     async def handle_invite(self, room: MatrixRoom, event: InviteMemberEvent):
         """Automatically joins any room the bot is invited to."""
-        # Ensure the invite is directed at our bot's user ID
         if event.state_key == self.client.user_id:
             print(f"[*] Received room invitation for {room.room_id} from {event.sender}")
             
@@ -615,7 +670,6 @@ class BasedMatrixBot:
                 print(f"[*] Joining room {room.room_id} (Attempt {attempt + 1}/3)...")
                 response = await self.client.join(room.room_id)
                 
-                # JoinResponse has a room_id attribute on success
                 if hasattr(response, "room_id"):
                     print(f"[+] Successfully joined room: {room.room_id}")
                     break
@@ -629,7 +683,6 @@ class BasedMatrixBot:
             return None
             
         try:
-            # Parse mxc://domain/media_id
             mxc_parts = mxc_url[6:].split("/", 1)
             if len(mxc_parts) != 2:
                 return None
@@ -668,34 +721,32 @@ class BasedMatrixBot:
         return None
 
     async def send_help_reply(self, room_id: str, event_id: str, message_md: str):
-            """Sends a formatted HTML notice replying to the sender's incorrect message."""
-            import markdown
-            
-            # Convert the markdown string to HTML for the Matrix client to render
-            html_body = markdown.markdown(message_md)
-            
-            content = {
-                "body": message_md,               # Plain text fallback
-                "msgtype": "m.notice",
-                "format": "org.matrix.custom.html",
-                "formatted_body": html_body,      # This enables the bold/icons/etc
-                "m.relates_to": {
-                    "m.in_reply_to": {
-                        "event_id": event_id
-                    }
+        """Sends a formatted HTML notice replying to the sender's incorrect message."""
+        # Convert the markdown string to HTML for the Matrix client to render
+        html_body = markdown.markdown(message_md)
+        
+        content = {
+            "body": message_md,               # Plain text fallback
+            "msgtype": "m.notice",
+            "format": "org.matrix.custom.html",
+            "formatted_body": html_body,      # This enables formatting
+            "m.relates_to": {
+                "m.in_reply_to": {
+                    "event_id": event_id
                 }
             }
-            
-            try:
-                resp = await self.client.room_send(
-                    room_id=room_id,
-                    message_type="m.room.message",
-                    content=content
-                )
-                if not isinstance(resp, RoomSendResponse):
-                    print(f"[!] Failed to send help reply: {getattr(resp, 'message', 'Unknown error')}")
-            except Exception as e:
-                print(f"[!] Exception raised while sending help reply: {e}")
+        }
+        
+        try:
+            resp = await self.client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content
+            )
+            if not isinstance(resp, RoomSendResponse):
+                print(f"[!] Failed to send help reply: {getattr(resp, 'message', 'Unknown error')}")
+        except Exception as e:
+            print(f"[!] Exception raised while sending help reply: {e}")
 
     async def handle_message(self, room: MatrixRoom, event: RoomMessageText):
         """Processes incoming room messages."""
@@ -707,13 +758,11 @@ class BasedMatrixBot:
         # -------------------------------------------------------------
         # Robust Command Parsing: Handle Reply blockquotes/fallbacks
         # -------------------------------------------------------------
-        # Matrix clients prepend standard reply content with a blockquote block (lines starting with '>')
-        # We strip those lines out to retrieve only the actual command text sent by the user
         lines = body.split("\n")
         command_lines = [line.strip() for line in lines if not line.strip().startswith(">")]
         clean_body = " ".join(command_lines).strip()
         
-        # Command recognition: Checks if the parsed command line begins with !based
+        # Command recognition
         if not clean_body.lower().startswith("!based"):
             return
 
@@ -723,15 +772,13 @@ class BasedMatrixBot:
         # Startup Replay Guard: Ignore old commands during startup catch-up
         # -------------------------------------------------------------
         now_ms = int(time.time() * 1000)
-        # We set this to 120,000ms (2 minutes) to tolerate federation delays on matrix.org
         if now_ms - event.server_timestamp > 120000:
             print(f"[*] Skipping old catch-up message from {event.sender} (timestamp delta: {now_ms - event.server_timestamp}ms)")
             return
 
-        # Parse command query text from our parsed clean body
+        # Parse command query text
         match = re.match(r"^!based\s+(.+)$", clean_body, re.IGNORECASE)
         if not match:
-            # Command was started but has wrong or missing text args
             print(f"[-] Incorrect command syntax from {event.sender}. Sending help...")
             await self.send_help_reply(room.room_id, event.event_id, HELP_MESSAGE)
             return
@@ -744,7 +791,6 @@ class BasedMatrixBot:
         parent_event_id = reply_to.get("event_id")
         
         if not parent_event_id:
-            # Attempted to use bot without replying to a message
             print(f"[-] Command used without a reply context. Sending help...")
             await self.send_help_reply(room.room_id, event.event_id, HELP_MESSAGE)
             return
@@ -752,13 +798,12 @@ class BasedMatrixBot:
         print(f"[*] Processing command !based with text: '{query_text}' in room {room.room_id}")
         
         # -------------------------------------------------------------
-        # Duplicate Prevention: Check past messages in room timeline history
+        # Duplicate Prevention
         # -------------------------------------------------------------
         already_replied = False
         start_token = getattr(room, "prev_batch", None)
         if start_token:
             try:
-                # Retrieve the last 20 messages safely via client API
                 history_resp = await self.client.room_messages(
                     room_id=room.room_id,
                     start=start_token,
@@ -786,12 +831,11 @@ class BasedMatrixBot:
                 print(f"[!] Warning: Failed to query room history for duplicates: {e}")
 
         if already_replied:
-            print(f"[-] Already processed or replied to parent event {parent_event_id} in recent messages. Skipping.")
+            print(f"[-] Already processed or replied to parent event {parent_event_id}. Skipping.")
             return
 
         parent_event = None
         try:
-            # Safely query the server directly for the parent event structure
             resp = await self.client.room_get_event(room.room_id, parent_event_id)
             if hasattr(resp, "event") and resp.event:
                 parent_event = resp.event
@@ -805,7 +849,6 @@ class BasedMatrixBot:
             print("[-] Replied-to event not found on the server.")
             return
             
-        # Get content structure of parent event safely
         parent_content = getattr(parent_event, "content", {}) or parent_event.source.get("content", {})
         msgtype = parent_content.get("msgtype")
         target_user_id = parent_event.sender
@@ -813,6 +856,15 @@ class BasedMatrixBot:
         image_bytes = None
         is_image_mode = False
         parent_clean_body = ""
+        target_display_name = target_user_id
+
+        # Fetch the pretty displayname for the target user
+        try:
+            profile = await self.client.get_profile(target_user_id)
+            if profile.displayname:
+                target_display_name = profile.displayname
+        except Exception as e:
+            print(f"[!] Failed to fetch profile pretty name for {target_user_id}: {e}")
 
         # -------------------------------------------------------------
         # IMAGE MODE: If the replied-to message is an image
@@ -821,11 +873,11 @@ class BasedMatrixBot:
             is_image_mode = True
             mxc_url = parent_content.get("url")
             if mxc_url:
-                print(f"[+] Parent message is an image! Bypassing text check. Fetching image...")
+                print(f"[+] Parent message is an image! Fetching image...")
                 image_bytes = await self.download_mxc(mxc_url)
             
             if not image_bytes:
-                print("[-] Failed to download the replied-to image. Sending fallback placeholder.")
+                print("[-] Failed to download the replied-to image.")
         
         # -------------------------------------------------------------
         # TEXT MODE: If the replied-to message is a standard text message
@@ -837,24 +889,22 @@ class BasedMatrixBot:
                 await self.send_help_reply(room.room_id, event.event_id, HELP_MESSAGE)
                 return
 
-            # Strip possible quote fallback lines in parent message so they don't render inside the card
             parent_lines = parent_body.split("\n")
             parent_clean_lines = [line.strip() for line in parent_lines if not line.strip().startswith(">")]
             parent_clean_body = " ".join(parent_clean_lines).strip()
 
-            # Case-insensitively match the search query to the target message text
-            if query_text.lower() not in parent_clean_body.lower():
-                print(f"[-] Match failed! '{query_text}' is not inside '{parent_clean_body}' (case-insensitive).")
+            # Perform the approximate word edit distance check (allowing up to 1 word added or removed)
+            if not is_approximate_match(parent_clean_body, query_text):
+                print(f"[-] Match failed! '{query_text}' differs by more than 1 word from '{parent_clean_body}' (case-insensitive, ignoring emojis).")
                 mismatch_reply = (
                     f"⚠️ **Text Match Failed!**\n\n"
-                    f"Your caption `\"{query_text}\"` was not found in the message you replied to.\n"
-                    f"Please make sure your caption matches the text case-insensitively!"
+                    f"Your caption `\"{query_text}\"` does not sufficiently match the message you replied to.\n"
+                    f"Please verify your caption quotes the text accurately (you can add or remove at most one word, ignoring emojis)!"
                 )
                 await self.send_help_reply(room.room_id, event.event_id, mismatch_reply)
                 return
                 
             print(f"[+] Match successful! Fetching profile picture for {target_user_id}.")
-            # Download profile picture to use in the card mock
             image_bytes = await self.get_target_avatar(target_user_id)
 
         # Generate the meme image in a non-blocking threadpool context
@@ -865,21 +915,17 @@ class BasedMatrixBot:
             image_bytes, 
             query_text, 
             is_image_mode, 
-            target_user_id, 
+            target_display_name, 
             parent_clean_body
         )
         
         # Upload the image to the homeserver
         print("[*] Uploading generated image...")
         try:
-            # Calculate the total file size from our memory buffer
             data_bytes = meme_buffer.getvalue()
             filesize = len(data_bytes)
-            
-            # Reset buffer seek position
             meme_buffer.seek(0)
             
-            # Using client.upload(...) as per the matrix-nio documentation
             upload_resp, maybe_keys = await self.client.upload(
                 meme_buffer,
                 content_type="image/png",
@@ -894,7 +940,6 @@ class BasedMatrixBot:
             mxc_uri = upload_resp.content_uri
             print(f"[+] Upload success! MXC URI: {mxc_uri}")
             
-            # Send the image as a standard message reply to the !based event
             content = {
                 "body": f"based_{query_text}.png",
                 "info": {
@@ -905,7 +950,6 @@ class BasedMatrixBot:
                 },
                 "msgtype": "m.image",
                 "url": mxc_uri,
-                # Explicitly thread as a reply to the original !based invocation
                 "m.relates_to": {
                     "m.in_reply_to": {
                         "event_id": event.event_id
@@ -919,15 +963,10 @@ class BasedMatrixBot:
                 content=content
             )
             
-            # Log exact failure reasons to standard output if matrix homeserver rejects the post
             if isinstance(resp, RoomSendResponse):
                 print("[+] Meme sent successfully!")
             else:
-                # resp is of type RoomSendError
-                print(f"[!] Error posting meme to room {room.room_id}:")
-                print(f"    - Message: {getattr(resp, 'message', 'No details provided')}")
-                print(f"    - Status Code: {getattr(resp, 'status_code', 'N/A')}")
-                print(f"    - Error Code: {getattr(resp, 'transport_status_code', 'N/A')}")
+                print(f"[!] Error posting meme: {getattr(resp, 'message', 'No details provided')}")
             
         except Exception as e:
             print(f"[!] Exception raised during upload or transmission: {e}")
@@ -978,7 +1017,7 @@ def setup_config():
 
 
 if __name__ == "__main__":
-    # Ensure font is downloaded and available locally
+    # Ensure fonts are downloaded and available locally
     ensure_font_installed()
     
     if not setup_config():
