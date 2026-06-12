@@ -9,9 +9,14 @@ Features:
 - Extremely secure layout parsing engine (no eval, no path traversals, strict validation).
 - Interactive first-time CLI setup wizard with config file generation.
 - Automated room invite-joining mechanism with retry safety logic.
-- Secure, keyless alternative cover art fetcher (iTunes API fallback) when Last.fm missing artwork.
+- Robust, keyless 3-tier fallback cover art fetcher (iTunes, Deezer, and MusicBrainz CAA) when Last.fm is missing artwork.
+- Smart split-artist queries: tries individual artists separately if combined group query fails to yield artwork.
+- Automatic, keyless music link resolver (YouTube, Spotify, direct Apple Music track URLs).
+- Double-lookup iTunes reliability: automatically extracts track ID from song URL and retries via Lookup API for accurate art.
 - Relative Last Active/Activity tracking notice ({activity}) built into rendering pipeline.
 - Proper alpha channel compositing for beautiful glassmorphism and frosted glass blends.
+- Customizable command triggers rebindable via config.json (to prevent conflict with other bots).
+- Dynamic, auto-adjusting Help Menu.
 
 Dependencies:
     pip install matrix-nio pillow requests aiohttp
@@ -78,7 +83,12 @@ def setup_config() -> bool:
         "password": password,
         "lastfm_api_key": lastfm_key,
         "db_file": "betterfm_db.json",
-        "cache_dir": "./cache"
+        "cache_dir": "./cache",
+        "cmd_fm": "!fm",
+        "cmd_stats": "!fmstats",
+        "cmd_setuser": "!setuser",
+        "cmd_setstyle": "!setstyle",
+        "cmd_help": "!fmhelp"
     }
     
     try:
@@ -111,6 +121,12 @@ CONFIG = {
     "LASTFM_API_KEY": FILE_CONFIG.get("lastfm_api_key") or os.getenv("LASTFM_API_KEY", ""),
     "DB_FILE": FILE_CONFIG.get("db_file") or os.getenv("BETTERFM_DB", "betterfm_db.json"),
     "CACHE_DIR": FILE_CONFIG.get("cache_dir") or os.getenv("BETTERFM_CACHE", "./cache"),
+    # Rebindable trigger commands configurations
+    "CMD_FM": FILE_CONFIG.get("cmd_fm", "!fm").strip().lower(),
+    "CMD_STATS": FILE_CONFIG.get("cmd_stats", "!fmstats").strip().lower(),
+    "CMD_SETUSER": FILE_CONFIG.get("cmd_setuser", "!setuser").strip().lower(),
+    "CMD_SETSTYLE": FILE_CONFIG.get("cmd_setstyle", "!setstyle").strip().lower(),
+    "CMD_HELP": FILE_CONFIG.get("cmd_help", "!fmhelp").strip().lower(),
 }
 
 # Ensure cache directory exists
@@ -188,22 +204,21 @@ class LastFMClient:
                 logger.error(f"Failed connecting to Last.fm API: {e}")
                 return None
 
-    async def get_fallback_cover_art(self, artist: str, title: str, album: str) -> Optional[str]:
-        """
-        Securely fetches high-quality cover art from the iTunes Search API 
-        if Last.fm fails to provide a URL.
-        """
-        search_term = f"{artist} {title}"
-        if album and album.lower() != "unknown album":
-            search_term += f" {album}"
+    @staticmethod
+    def split_artists(artist_str: str) -> list:
+        """Splits complex combined group/featured artists into individual tokens."""
+        # Split by comma, ampersand, 'and', 'feat.', 'ft.', slash, plus, with optional surrounding whitespace
+        tokens = re.split(r'\s*(?:,|&|\band\b|\bfeat\b|\bfeat\.\b|\bft\.\b|\bft\b|/|\+)\s*', artist_str, flags=re.IGNORECASE)
+        # Filter out empty items
+        cleaned = [t.strip() for t in tokens if t.strip()]
+        return cleaned
 
-        # Clean search term from special or problematic characters
-        search_term = re.sub(r"[^\w\s\-]", "", search_term)
+    async def _fetch_itunes(self, search_term: str) -> Optional[str]:
+        """Queries iTunes Search API (Fallback Tier 1)."""
         url = f"https://itunes.apple.com/search?term={quote_plus(search_term)}&entity=song&limit=1"
-
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(url, timeout=5) as resp:
+                async with session.get(url, timeout=4) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
                         results = data.get("results", [])
@@ -212,8 +227,168 @@ class LastFMClient:
                             if art_url:
                                 return art_url.replace("100x100bb", "600x600bb")
             except Exception as e:
-                logger.warning(f"Failed fetching fallback artwork from iTunes: {e}")
+                logger.warning(f"iTunes fallback fetch failed: {e}")
         return None
+
+    async def _fetch_deezer(self, search_term: str) -> Optional[str]:
+        """Queries Deezer Public Search API (Fallback Tier 2)."""
+        url = f"https://api.deezer.com/search?q={quote_plus(search_term)}&limit=1"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=4) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        results = data.get("data", [])
+                        if results:
+                            album = results[0].get("album", {})
+                            art_url = album.get("cover_xl") or album.get("cover_big")
+                            if art_url:
+                                return art_url
+            except Exception as e:
+                logger.warning(f"Deezer fallback fetch failed: {e}")
+        return None
+
+    async def _fetch_musicbrainz(self, artist: str, album_name: str) -> Optional[str]:
+        """Queries MusicBrainz API & Cover Art Archive (Fallback Tier 3)."""
+        if not album_name or album_name.lower() == "unknown album":
+            return None
+            
+        mb_query = f'artist:"{artist}" AND release:"{album_name}"'
+        url = f"https://musicbrainz.org/ws/2/release?query={quote_plus(mb_query)}&fmt=json"
+        headers = {"User-Agent": "betterFM-Matrix-Bot (https://github.com/40476/matrix-bots/tree/main/betterfm)"}
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, headers=headers, timeout=4) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        releases = data.get("releases", [])
+                        if releases:
+                            mbid = releases[0].get("id")
+                            if mbid:
+                                # Query the free Cover Art Archive
+                                caa_url = f"https://coverartarchive.org/release/{mbid}"
+                                async with session.get(caa_url, timeout=4) as caa_resp:
+                                    if caa_resp.status == 200:
+                                        caa_data = await caa_resp.json(content_type=None)
+                                        images = caa_data.get("images", [])
+                                        if images:
+                                            return images[0].get("image")
+            except Exception as e:
+                logger.warning(f"MusicBrainz Cover Art Archive fallback failed: {e}")
+        return None
+
+    async def resolve_metadata(self, artist: str, title: str, album: str, album_art_url: Optional[str]) -> Tuple[Optional[str], Dict[str, str]]:
+        """
+        An advanced fallback pipeline trying multiple public keyless
+        APIs to resolve cover art (including individual split artist retry
+        and a reliable direct iTunes lookup ID retry loop) and direct streaming links.
+        """
+        clean_artist = re.sub(r"[^\w\s\-]", "", artist)
+        clean_title = re.sub(r"[^\w\s\-]", "", title)
+        clean_album = re.sub(r"[^\w\s\-]", "", album) if album else ""
+        
+        # Build standard fallbacks (search fallback links)
+        search_query_encoded = quote_plus(f"{artist} - {title}")
+        links = {
+            "youtube": f"https://www.youtube.com/results?search_query={search_query_encoded}",
+            "spotify": f"https://open.spotify.com/search/{search_query_encoded}",
+            "apple": f"https://music.apple.com/us/search?term={search_query_encoded}"
+        }
+        
+        resolved_art = album_art_url
+        
+        # Build search term for first-pass
+        search_query = f"{clean_artist} {clean_title}"
+        if clean_album and clean_album.lower() != "unknown album":
+            search_query += f" {clean_album}"
+
+        # Consolidate first-pass requests to fetch fallback artwork AND direct links
+        async with aiohttp.ClientSession() as session:
+            # 1. Query iTunes Search (returns direct Apple Music links!)
+            try:
+                itunes_url = f"https://itunes.apple.com/search?term={quote_plus(search_query)}&entity=song&limit=1"
+                async with session.get(itunes_url, timeout=4) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        results = data.get("results", [])
+                        if results:
+                            # Direct Apple Music/iTunes track url found!
+                            direct_apple = results[0].get("trackViewUrl")
+                            if direct_apple:
+                                links["apple"] = direct_apple
+                                
+                                # Extract track ID to run direct lookup retry for top-tier reliability
+                                track_id_match = re.search(r"[?&]i=(\d+)", direct_apple) or re.search(r"/id(\d+)", direct_apple)
+                                if track_id_match:
+                                    track_id = track_id_match.group(1)
+                                    logger.info(f"Direct Apple Music Track ID {track_id} found. Fetching via exact lookup API...")
+                                    lookup_url = f"https://itunes.apple.com/lookup?id={track_id}"
+                                    async with session.get(lookup_url, timeout=4) as lookup_resp:
+                                        if lookup_resp.status == 200:
+                                            lookup_data = await lookup_resp.json(content_type=None)
+                                            lookup_results = lookup_data.get("results", [])
+                                            if lookup_results:
+                                                # Exact match direct lookup successful!
+                                                raw_art = lookup_results[0].get("artworkUrl100", "")
+                                                if raw_art:
+                                                    resolved_art = raw_art.replace("100x100bb", "600x600bb")
+                                                    logger.info("Successfully fetched verified direct artwork via iTunes Lookup API!")
+                                
+                            # Fallback if track ID query was not processed or failed
+                            if not resolved_art:
+                                raw_art = results[0].get("artworkUrl100", "")
+                                if raw_art:
+                                    resolved_art = raw_art.replace("100x100bb", "600x600bb")
+            except Exception as e:
+                logger.warning(f"iTunes query pass failed: {e}")
+                
+            # 2. Query Deezer (extremely reliable global search)
+            try:
+                deezer_url = f"https://api.deezer.com/search?q={quote_plus(search_query)}&limit=1"
+                async with session.get(deezer_url, timeout=4) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        results = data.get("data", [])
+                        if results:
+                            if not resolved_art:
+                                raw_art = results[0].get("album", {}).get("cover_xl") or results[0].get("album", {}).get("cover_big")
+                                if raw_art:
+                                    resolved_art = raw_art
+            except Exception as e:
+                logger.warning(f"Deezer query pass failed: {e}")
+
+        # If combined search fails to find artwork, split combined group artist strings and try separately
+        if not resolved_art:
+            artists_list = self.split_artists(artist)
+            if len(artists_list) > 1:
+                logger.info(f"Main combined artist artwork failed. Trying split individual artists separately: {artists_list}")
+                for split_art in artists_list:
+                    split_query = f"{split_art} {clean_title}"
+                    if clean_album and clean_album.lower() != "unknown album":
+                        split_query += f" {clean_album}"
+                    
+                    # Sequential keyless fallback tries on split artist
+                    resolved_art = await self._fetch_itunes(split_query)
+                    if resolved_art:
+                        logger.info(f"Successfully resolved fallback artwork using split artist: {split_art}")
+                        break
+                        
+                    resolved_art = await self._fetch_deezer(split_query)
+                    if resolved_art:
+                        logger.info(f"Successfully resolved fallback artwork using split artist: {split_art}")
+                        break
+                        
+                    resolved_art = await self._fetch_musicbrainz(split_art, clean_album)
+                    if resolved_art:
+                        logger.info(f"Successfully resolved fallback artwork using split artist: {split_art}")
+                        break
+
+        # Fallback to MusicBrainz main combined query as final effort
+        if not resolved_art:
+            resolved_art = await self._fetch_musicbrainz(clean_artist, clean_album)
+
+        return resolved_art, links
 
     async def get_now_playing(self, username: str) -> Optional[Dict[str, Any]]:
         data = await self._fetch({
@@ -245,10 +420,8 @@ class LastFMClient:
             if img.get("size") == "extralarge" or img.get("size") == "large":
                 album_art_url = img.get("#text", "")
 
-        # Fallback cover art search if Last.fm didn't provide any artwork image URL
-        if not album_art_url:
-            logger.info(f"Last.fm artwork missing. Querying alternative sources for: {artist_name} - {track_title}")
-            album_art_url = await self.get_fallback_cover_art(artist_name, track_title, album_name) or ""
+        # Unified fallbacks resolve pass (Artwork fallbacks & Music links extraction)
+        resolved_art, links = await self.resolve_metadata(artist_name, track_title, album_name, album_art_url or None)
 
         # Activity Relative Notice calculation
         activity = "Active"
@@ -276,8 +449,9 @@ class LastFMClient:
             "artist": artist_name,
             "album": album_name,
             "now_playing": is_now_playing,
-            "album_art": album_art_url or None,
-            "activity": activity
+            "album_art": resolved_art,
+            "activity": activity,
+            "links": links
         }
 
     async def get_user_stats(self, username: str, period: str = "7day") -> Optional[Dict[str, Any]]:
@@ -320,7 +494,6 @@ class LastFMClient:
 
 
 # --- SECURE CANVAS / RENDERING ENGINE Presets ---
-# Upgraded with proper alpha-layered designs, beautiful square/vertical sizes, and 4 brand new highly-distinguished styles!
 STYLE_PRESETS = {
     "modern_dark": (
         "canvas 800 250 #1e1e24\n"
@@ -588,7 +761,7 @@ class SecureRenderer:
                 if cmd == "rect" and len(parts) >= 6:
                     x0, y0, x1, y1 = map(int, parts[1:5])
                     color = cls.parse_color(parts[5])
-                    # Fix: Handle true transparency alpha compositing to avoid overwrite artifacts
+                    # Handle true transparency alpha compositing to avoid overwrite artifacts
                     if len(color) == 4 and color[3] < 255:
                         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
                         overlay_draw = ImageDraw.Draw(overlay)
@@ -601,7 +774,7 @@ class SecureRenderer:
                 elif cmd == "ellipse" and len(parts) >= 6:
                     x0, y0, x1, y1 = map(int, parts[1:5])
                     color = cls.parse_color(parts[5])
-                    # Fix: Handle true transparency alpha compositing to avoid overwrite artifacts
+                    # Handle true transparency alpha compositing to avoid overwrite artifacts
                     if len(color) == 4 and color[3] < 255:
                         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
                         overlay_draw = ImageDraw.Draw(overlay)
@@ -736,14 +909,17 @@ class BetterFMBot:
         parts = body.split()
         cmd = parts[0].lower()
 
-        if cmd == "!fm":
+        # Dynamic, configurable command mapping checks
+        if cmd == CONFIG["CMD_FM"]:
             await self.handle_fm(room, event, parts)
-        elif cmd == "!fmstats":
+        elif cmd == CONFIG["CMD_STATS"]:
             await self.handle_fm_stats(room, event, parts)
-        elif cmd == "!setuser":
+        elif cmd == CONFIG["CMD_SETUSER"]:
             await self.handle_set_user(room, event, parts)
-        elif cmd == "!setstyle":
+        elif cmd == CONFIG["CMD_SETSTYLE"]:
             await self.handle_set_style(room, event, body)
+        elif cmd == CONFIG["CMD_HELP"]:
+            await self.handle_help(room)
 
     async def upload_image_to_matrix(self, image_data: BytesIO, filename: str) -> Optional[str]:
         """Uploads a PIL generated PNG binary onto Matrix media storage securely."""
@@ -772,6 +948,33 @@ class BetterFMBot:
             logger.error(f"Failed to upload media to Matrix server due to exception: {e}", exc_info=True)
             return None
 
+    async def handle_help(self, room: MatrixRoom):
+        """Sends a beautiful markdown help menu reflecting current trigger command configurations."""
+        help_msg = (
+            "📖 **betterFM Bot Help Menu**\n"
+            "This bot shows what you are listening to on Last.fm!\n\n"
+            "**Commands:**\n"
+            f"- `{CONFIG['CMD_FM']} [user]` - Shows currently playing track with album cover card (defaults to you).\n"
+            f"- `{CONFIG['CMD_STATS']} [user] [daily/monthly/overall]` - Fetches playstats and top tracks.\n"
+            f"- `{CONFIG['CMD_SETUSER']} <lastfm_username>` - Links your Matrix ID to your Last.fm account.\n"
+            f"- `{CONFIG['CMD_SETSTYLE']} <preset>` - Switches your design theme.\n"
+            f"- `{CONFIG['CMD_SETSTYLE']} custom <directives>` - Saves a custom canvas design!\n"
+            f"- `{CONFIG['CMD_HELP']}` - Shows this help menu.\n\n"
+            "**Available Presets:**\n"
+            f"`{', '.join(STYLE_PRESETS.keys())}`"
+        )
+        
+        await self.client.room_send(
+            room.room_id,
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": help_msg.replace("**", ""),
+                "format": "org.matrix.custom.html",
+                "formatted_body": help_msg.replace("\n", "<br>")
+            }
+        )
+
     async def handle_fm(self, room: MatrixRoom, event: RoomMessageText, parts: list):
         sender = event.sender
         target_lastfm = None
@@ -786,7 +989,7 @@ class BetterFMBot:
                         "m.room.message",
                         {
                             "msgtype": "m.text",
-                            "body": f"No Last.fm account bound to Matrix user: {possible_target}. Ask them to run !setuser <username>."
+                            "body": f"No Last.fm account bound to Matrix user: {possible_target}. Ask them to run {CONFIG['CMD_SETUSER']} <username>."
                         }
                     )
                     return
@@ -800,7 +1003,7 @@ class BetterFMBot:
                     "m.room.message",
                     {
                         "msgtype": "m.text",
-                        "body": f"Hi {sender}! You haven't registered your Last.fm profile with this bot. Please set it using: !setuser <lastfm_username>"
+                        "body": f"Hi {sender}! You haven't registered your Last.fm profile with this bot. Please set it using: {CONFIG['CMD_SETUSER']} <lastfm_username>"
                     }
                 )
                 return
@@ -861,11 +1064,29 @@ class BetterFMBot:
             
             if mxc_uri:
                 status_msg = "Currently playing:" if track_info["now_playing"] else "Last played track:"
+                
+                # Fetch Resolved direct URLs for music services (Spotify, YouTube, Apple Music)
+                youtube_url = track_info["links"]["youtube"]
+                spotify_url = track_info["links"]["spotify"]
+                apple_url = track_info["links"]["apple"]
+                
+                # Sane plain-text fallback caption
                 formatted_body = (
                     f"🎵 {status_msg} {track_info['artist']} - {track_info['title']} "
-                    f"(Album: {track_info['album']}) [{target_lastfm}]"
+                    f"(Album: {track_info['album']}) [{target_lastfm}]\n"
+                    f"Listen: YouTube: {youtube_url} | Spotify: {spotify_url} | Apple Music: {apple_url}"
                 )
                 
+                # Premium HTML-styled caption with clickable hyperlinked services
+                html_body = (
+                    f"🎵 {status_msg} <b>{track_info['artist']}</b> - <b>{track_info['title']}</b> "
+                    f"(<i>Album: {track_info['album']}</i>) [{target_lastfm}]<br/>"
+                    f"▶️ Listen: <a href='{youtube_url}'>YouTube</a> | "
+                    f"<a href='{spotify_url}'>Spotify</a> | "
+                    f"<a href='{apple_url}'>Apple Music</a>"
+                )
+                
+                # Send room message matching the client standard json structure (incorporating top level filename)
                 await self.client.room_send(
                     room.room_id,
                     "m.room.message",
@@ -873,6 +1094,9 @@ class BetterFMBot:
                         "msgtype": "m.image",
                         "body": formatted_body,
                         "url": mxc_uri,
+                        "filename": f"{target_lastfm}_fm.png",
+                        "format": "org.matrix.custom.html",
+                        "formatted_body": html_body,
                         "info": {
                             "mimetype": "image/png",
                             "w": card_width,
@@ -911,7 +1135,7 @@ class BetterFMBot:
                 "m.room.message",
                 {
                     "msgtype": "m.text",
-                    "body": "No username registered. Please use !setuser <username> first."
+                    "body": f"No username registered. Please use {CONFIG['CMD_SETUSER']} <username> first."
                 }
             )
             return
@@ -965,7 +1189,7 @@ class BetterFMBot:
                 "m.room.message",
                 {
                     "msgtype": "m.text",
-                    "body": "Usage: !setuser <lastfm_username>"
+                    "body": f"Usage: {CONFIG['CMD_SETUSER']} <lastfm_username>"
                 }
             )
             return
@@ -1003,7 +1227,7 @@ class BetterFMBot:
                 "m.room.message",
                 {
                     "msgtype": "m.text",
-                    "body": f"Usage: !setstyle <preset_name> OR !setstyle custom <layout directives>\nAvailable Presets: {presets_list}"
+                    "body": f"Usage: {CONFIG['CMD_SETSTYLE']} <preset_name> OR {CONFIG['CMD_SETSTYLE']} custom <layout directives>\nAvailable Presets: {presets_list}"
                 }
             )
             return
@@ -1045,7 +1269,7 @@ class BetterFMBot:
                 "m.room.message",
                 {
                     "msgtype": "m.text",
-                    "body": "🎨 Custom style set successfully. Run `!fm` to test your look!"
+                    "body": f"🎨 Custom style set successfully. Run {CONFIG['CMD_FM']} to test your look!"
                 }
             )
         else:
