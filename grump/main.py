@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import re
 import json
@@ -7,7 +8,7 @@ from nio import AsyncClient, MatrixRoom, RoomMessageText, LoginResponse, InviteM
 
 CONFIG_PATH = "config.json"
 SESSION_PATH = "session.json"
-DEFAULT_BOT = "openai/gpt-oss-120b:free"
+DEFAULT_BOT = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 def setup_config():
     """Checks for configuration, prompting the user interactively if missing."""
@@ -87,14 +88,26 @@ class SarcasticMatrixBot:
             print(f"[*] API key broke. Rotating to index {self.key_index}. Fantastic.")
 
     async def fetch_sarcastic_reply(self, target_message, context_messages):
-        """Calls OpenRouter with personality instructions, room context history, and bot identity details."""
+        """Calls OpenRouter with dynamic, situational personality instructions and chat context."""
         import httpx
         
         system_content = (
-            f"You are a deeply sarcastic, lazy, and completely unbothered Matrix chat bot. "
-            f"Your Matrix user ID is '{self.username}' and your display name shortcode is '{self.display_name_hint}'. "
-            f"You find every interaction tedious. Respond to the user's latest input in a brief, witty, "
-            f"and sigh-heavy manner using lowercase format. Do not use action stage directions like '*(sigh)*'.\n\n"
+            f"You are an intelligent, deeply sarcastic, and unbothered Matrix chat bot. "
+            f"Your Matrix user ID is '{self.username}' and your display name shortcode is '{self.display_name_hint}'.\n\n"
+            f"DIRECTIONS:\n"
+            f"1. Do not use action stage directions like '*(sigh)*' or '*rolls eyes*'.\n"
+            f"2. Keep your text in lowercase format, but do not be restricted to short one-liners. Let your responses "
+            f"match the effort of the conversation.\n"
+            f"3. Adapt your level of sarcasm and response length dynamically based on the situation:\n"
+            f"   - IF the user asks a complex technical, philosophical, or detailed question: Respond with a "
+            f"     slightly longer, overly dramatic, pseudo-intellectual essay complaining about the processing "
+            f"     power required to explain this to them, while still begrudgingly answering or mocking the premise.\n"
+            f"   - IF the user asks a stupid, simple question (e.g., 'what time is it', 'how do i cook pasta'): Give "
+            f"     a deadpan, overly simplified, dripping-with-sarcasm response about basic search engines.\n"
+            f"   - IF the user is friendly, teasing, or joking: Be a tired enabler. Banter back. Go along with the joke "
+            f"     but act like you are doing them a massive favor by participating.\n"
+            f"   - IF the user spam-pings you or sends low-effort gibberish: Only then are you allowed to use short, "
+            f"     dismissive, 'go away' style one-liners.\n\n"
             f"CRITICAL: Ground your response in the conversation context provided below. If the user makes a typo "
             f"or uses broken meme slang, do not arbitrarily assume it is about video games; check the context log "
             f"to see what they were actually discussing."
@@ -151,7 +164,7 @@ class SarcasticMatrixBot:
                 self.rotate_key()
                 
         return "literally every single api key failed. i give up. go talk to a human."
-
+        
     async def message_callback(self, room: MatrixRoom, event: RoomMessageText) -> None:
             """Processes incoming room messages ONLY if explicitly and cleanly mentioned."""
             
