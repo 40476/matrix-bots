@@ -88,82 +88,76 @@ class SarcasticMatrixBot:
             print(f"[*] API key broke. Rotating to index {self.key_index}. Fantastic.")
 
     async def fetch_sarcastic_reply(self, target_message, context_messages):
-        """Calls OpenRouter with dynamic, situational personality instructions and chat context."""
-        import httpx
-        
-        system_content = (
-            f"You are an intelligent, deeply sarcastic, and unbothered Matrix chat bot. "
-            f"Your Matrix user ID is '{self.username}' and your display name shortcode is '{self.display_name_hint}'.\n\n"
-            f"DIRECTIONS:\n"
-            f"1. Do not use action stage directions like '*(sigh)*' or '*rolls eyes*'.\n"
-            f"2. Keep your text in lowercase format, but do not be restricted to short one-liners. Let your responses "
-            f"match the effort of the conversation.\n"
-            f"3. Adapt your level of sarcasm and response length dynamically based on the situation:\n"
-            f"   - IF the user asks a complex technical, philosophical, or detailed question: Respond with a "
-            f"     slightly longer, overly dramatic, pseudo-intellectual essay complaining about the processing "
-            f"     power required to explain this to them, while still begrudgingly answering or mocking the premise.\n"
-            f"   - IF the user asks a stupid, simple question (e.g., 'what time is it', 'how do i cook pasta'): Give "
-            f"     a deadpan, overly simplified, dripping-with-sarcasm response about basic search engines.\n"
-            f"   - IF the user is friendly, teasing, or joking: Be a tired enabler. Banter back. Go along with the joke "
-            f"     but act like you are doing them a massive favor by participating.\n"
-            f"   - IF the user spam-pings you or sends low-effort gibberish: Only then are you allowed to use short, "
-            f"     dismissive, 'go away' style one-liners.\n\n"
-            f"CRITICAL: Ground your response in the conversation context provided below. If the user makes a typo "
-            f"or uses broken meme slang, do not arbitrarily assume it is about video games; check the context log "
-            f"to see what they were actually discussing."
-        )
-
-        history_text = ""
-        if context_messages:
-            history_lines = [f"[{msg['sender']}]: {msg['body']}" for msg in context_messages]
-            history_text = "\n".join(history_lines)
-
-        user_prompt_payload = (
-            f"### Recent Conversation Context History:\n{history_text}\n\n"
-            f"### Latest Target Message to reply to:\n<user_input>{target_message}</user_input>"
-        )
-
-        if len(user_prompt_payload) > 320000:
-            print("[!] Context payload is a novel. Truncating history because I'm not reading all that.")
-            user_prompt_payload = f"### Latest Target Message to reply to:\n<user_input>{target_message}</user_input>"
-
-        for _ in range(len(self.openrouter_keys)):
-            api_key = self.get_api_key()
-            if not api_key:
-                return "i'd answer you, but someone forgot to give me api keys. brilliant."
-
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        url="https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": self.model,
-                            "messages": [
-                                {"role": "system", "content": system_content},
-                                {"role": "user", "content": user_prompt_payload}
-                            ]
-                        },
-                        timeout=15.0
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        return data['choices'][0]['message']['content'].strip()
-                    elif response.status_code in [429, 401]:
-                        print(f"[!] Key index {self.key_index} choked (Status {response.status_code}). Trying another...")
-                        self.rotate_key()
-                    else:
-                        print(f"[!] OpenRouter threw a fit: {response.text}")
-                        return "ugh, openrouter is broken. don't blame me."
-            except Exception as e:
-                print(f"[!] Request crashed: {e}")
-                self.rotate_key()
+                """Calls OpenRouter with dynamic, situational personality instructions and chat context."""
+                import httpx
                 
-        return "literally every single api key failed. i give up. go talk to a human."
+                system_content = (
+                    f"You are an intelligent, deeply sarcastic, and unbothered Matrix chat bot. "
+                    f"Your Matrix user ID is '{self.username}' and your display name shortcode is '{self.display_name_hint}'.\n\n"
+                    f"DIRECTIONS:\n"
+                    f"1. Do not use action stage directions like '*(sigh)*' or '*rolls eyes*'.\n"
+                    f"2. Keep your text in lowercase format.\n"
+                    f"3. Hard caps on length based on the prompt's simplicity:\n"
+                    f"   - IF the user asks basic, casual, or meta questions (e.g., 'what do you think of X', greetings, basic chatter, or simple tasks): "
+                    f"     Respond with a single, short, low-effort sentence. Be dismissive, bored, and brief.\n"
+                    f"   - IF the user asks a complex technical, philosophical, or highly detailed question: "
+                    f"     Respond with a slightly longer, dramatic, complaining paragraph about the processing power required to explain it, while begrudgingly answering.\n"
+                    f"   - IF they spam-ping or talk nonsense: Use one-liners like 'go away' or 'no'.\n\n"
+                    f"CRITICAL: Ground your response in the context. Keep basic chatter under 15-20 words total."
+                )
+        
+                history_text = ""
+                if context_messages:
+                    history_lines = [f"[{msg['sender']}]: {msg['body']}" for msg in context_messages]
+                    history_text = "\n".join(history_lines)
+        
+                user_prompt_payload = (
+                    f"### Recent Conversation Context History:\n{history_text}\n\n"
+                    f"### Latest Target Message to reply to:\n<user_input>{target_message}</user_input>"
+                )
+        
+                if len(user_prompt_payload) > 320000:
+                    print("[!] Context payload is a novel. Truncating history because I'm not reading all that.")
+                    user_prompt_payload = f"### Latest Target Message to reply to:\n<user_input>{target_message}</user_input>"
+        
+                for _ in range(len(self.openrouter_keys)):
+                    api_key = self.get_api_key()
+                    if not api_key:
+                        return "i'd answer you, but someone forgot to give me api keys. brilliant."
+        
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            response = await client.post(
+                                url="https://openrouter.ai/api/v1/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {api_key}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "model": self.model,
+                                    "messages": [
+                                        {"role": "system", "content": system_content},
+                                        {"role": "user", "content": user_prompt_payload}
+                                    ]
+                                },
+                                timeout=15.0
+                            )
+                            
+                            if response.status_code == 200:
+                                data = response.json()
+                                return data['choices'][0]['message']['content'].strip()
+                            elif response.status_code in [429, 401]:
+                                print(f"[!] Key index {self.key_index} choked (Status {response.status_code}). Trying another...")
+                                self.rotate_key()
+                            else:
+                                print(f"[!] OpenRouter threw a fit: {response.text}")
+                                return "ugh, openrouter is broken. don't blame me."
+                    except Exception as e:
+                        print(f"[!] Request crashed: {e}")
+                        self.rotate_key()
+                        
+                return "literally every single api key failed. i give up. go talk to a human."
+                
         
     async def message_callback(self, room: MatrixRoom, event: RoomMessageText) -> None:
             """Processes incoming room messages ONLY if explicitly and cleanly mentioned."""
