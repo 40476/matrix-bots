@@ -138,7 +138,7 @@ class SarcasticMatrixBot:
     async def fetch_sarcastic_reply(self, target_message, context_messages, sender_id, image_data=None):
         """
         Calls OpenRouter with system memory, user profiles, context, and optional image parameters.
-        Includes a JSON structured system prompt instruction requesting structural outputs.
+        Includes an automatic self-healing token limiter for credit-strapped accounts.
         """
         api_key = self.get_api_key()
         if not api_key:
@@ -189,23 +189,29 @@ class SarcasticMatrixBot:
                 }
             })
 
-        for _ in range(len(self.openrouter_keys)):
+        # Set a safe, low default limit first. Gemini doesn't need 65k tokens to call you stupid.
+        requested_max_tokens = 1000 
+
+        for _ in range(len(self.openrouter_keys) * 2): # Double attempts to allow for self-healing retries
             try:
                 async with httpx.AsyncClient() as client:
+                    payload = {
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_content},
+                            {"role": "user", "content": user_content}
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "max_tokens": requested_max_tokens  # <-- Hard limit applied here
+                    }
+
                     response = await client.post(
                         url="https://openrouter.ai/api/v1/chat/completions",
                         headers={
                             "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json",
                         },
-                        json={
-                            "model": self.model,
-                            "messages": [
-                                {"role": "system", "content": system_content},
-                                {"role": "user", "content": user_content}
-                            ],
-                            "response_format": {"type": "json_object"}
-                        },
+                        json=payload,
                         timeout=30.0
                     )
                     
@@ -227,6 +233,26 @@ class SarcasticMatrixBot:
 
                         return parsed.get("response", "done. you can leave me alone now.")
                     
+                    elif response.status_code == 402:
+                        # DYNAMIC TOKEN LIMITER IN ACTION
+                        error_data = response.json()
+                        error_msg = error_data.get("error", {}).get("message", "")
+                        print(f"[!] Credit issue (402). OpenRouter complained: '{error_msg}'")
+                        
+                        # Extract the wallet limit from the error message using regex: "can only afford <num>"
+                        match = re.search(r"can only afford (\d+)", error_msg)
+                        if match:
+                            affordable_tokens = int(match.group(1))
+                            # Set the new budget to a safe 75% of whatever we can afford
+                            requested_max_tokens = max(100, int(affordable_tokens * 0.75))
+                            print(f"[*] Dynamically shrinking requested max_tokens to: {requested_max_tokens}. Retrying request...")
+                            continue # Try again on the next loop iteration with the lower limit
+                        else:
+                            # Fallback if the error structure changed
+                            requested_max_tokens = 300
+                            print(f"[*] Couldn't parse exact limit. Blindly lowering max_tokens to {requested_max_tokens} and retrying...")
+                            continue
+                    
                     elif response.status_code in [429, 401]:
                         print(f"[!] Key index {self.key_index} choked (Status {response.status_code}). Rotating...")
                         self.rotate_key()
@@ -239,8 +265,8 @@ class SarcasticMatrixBot:
                 self.rotate_key()
                 api_key = self.get_api_key()
                 
-        return "literally every single api key failed. i give up."
-
+        return "literally every single api key failed or we are completely broke. i give up."
+        
     async def download_matrix_image(self, mxc_url):
         """Downloads media payload from Matrix Homeserver and returns base64 content."""
         if not mxc_url.startswith("mxc://"):
