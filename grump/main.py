@@ -482,7 +482,7 @@ class SarcasticMatrixBot:
             print(f"[*] Spammer check: {event.sender} has sent {recent_msg_count} messages in the last 2 minutes.")
             
             buffer_left = None
-            if recent_msg_count > 16:
+            if recent_msg_count > 12:
                 # Initiate countdown warning if not already set
                 if tracker_key not in self.spam_warnings:
                     self.spam_warnings[tracker_key] = 3
