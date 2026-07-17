@@ -630,9 +630,13 @@ async def main():
         
     bot = SarcasticMatrixBot(config)
     
-    # Now 'async with' is safely inside an async function!
-    async with bot.client: 
+    try:
+        # Run the bot directly without the context manager
         await bot.run()
+    finally:
+        # Explicitly close the client's HTTP session when shutting down
+        print("[*] Cleaning up connection... (Begrudgingly)")
+        await bot.client.close()
 
 if __name__ == "__main__":
     setup_config()
