@@ -81,7 +81,7 @@ class SarcasticMatrixBot:
         self.model = config.get("model", DEFAULT_BOT)
         self.blacklist = config.get("blacklist", [])
         self.key_index = 0  
-        
+        self.processed_events = set()
         self.display_name_hint = self.username.split(":")[0].replace("@", "")
         self.client = AsyncClient(self.homeserver, self.username)
         
@@ -414,6 +414,18 @@ class SarcasticMatrixBot:
         if event.sender in self.blacklist:
             return
 
+        # 1. IMMEDIATE RACE-CONDITION GUARD
+        if event.event_id in self.processed_events:
+            return
+        
+        # Mark it processed immediately before doing any awaiting
+        self.processed_events.add(event.event_id)
+        
+        # Keep cache size bounded
+        if len(self.processed_events) > 200:
+            self.processed_events.remove(next(iter(self.processed_events)))
+
+        # 2. EXPLICIT TYPE CHECKING
         is_text_event = isinstance(event, RoomMessageText)
         is_image_event = isinstance(event, RoomMessageImage)
 
@@ -601,8 +613,8 @@ class SarcasticMatrixBot:
                 print(f"[CRITICAL] Login failed: {getattr(response, 'message', 'The server hated your request')}")
                 return
 
-        self.client.add_event_callback(self.message_callback, RoomMessageText)
-        self.client.add_event_callback(self.message_callback, RoomMessageImage)
+        from nio import RoomMessage
+        self.client.add_event_callback(self.message_callback, RoomMessage)
         self.client.add_event_callback(self.handle_invite, InviteMemberEvent)
         
         print(f"\n[+] Bot is running as {self.username}. Using model: {self.model}")
