@@ -275,7 +275,7 @@ class SarcasticMatrixBot:
                             {"role": "system", "content": system_content},
                             {"role": "user", "content": user_content}
                         ],
-                        "tools": tools,
+                        # "tools": tools,
                         "response_format": {"type": "json_object"},
                         "max_tokens": requested_max_tokens
                     }
