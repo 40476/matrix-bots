@@ -624,14 +624,19 @@ class SarcasticMatrixBot:
                     print(f"[!] Entrance blocked: {getattr(response, 'message', 'Unknown gatekeeping issue')}")
                     await asyncio.sleep(3)
 
-if __name__ == "__main__":
-    setup_config()
+async def main():
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
         
     bot = SarcasticMatrixBot(config)
+    
+    # Now 'async with' is safely inside an async function!
+    async with bot.client: 
+        await bot.run()
+
+if __name__ == "__main__":
+    setup_config()
     try:
-        async with bot.client: # Uses nio's context manager for connection cleanup
-            asyncio.run(bot.run())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[+] Thrilled to be shutting down. Goodbye forever (or until you restart me).")
