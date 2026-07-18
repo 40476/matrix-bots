@@ -353,20 +353,20 @@ class HAL9000MatrixBot:
             })
 
         tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Queries public networks for fresh external information, articles, and documentation only when the user request explicitly requires current or external facts.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "The search keywords or database query."}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            },
+            # {
+            #     "type": "function",
+            #     "function": {
+            #         "name": "web_search",
+            #         "description": "Queries public networks for fresh external information, articles, and documentation only when the user request explicitly requires current or external facts.",
+            #         "parameters": {
+            #             "type": "object",
+            #             "properties": {
+            #                 "query": {"type": "string", "description": "The search keywords or database query."}
+            #             },
+            #             "required": ["query"]
+            #         }
+            #     }
+            # },
             {
                 "type": "function",
                 "function": {
