@@ -44,7 +44,7 @@ fi
 # Upgrade pip and install all necessary dependencies
 echo "[*] Checking and updating dependencies..."
 pip install --upgrade pip
-pip install matrix-nio httpx pillow
+pip install matrix-nio httpx pillow bs4
 
 # Run the bot
 echo "[*] Starting the Matrix Based Bot..."
