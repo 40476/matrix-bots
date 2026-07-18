@@ -23,6 +23,11 @@ CONFIG_PATH = "config.json"
 SESSION_PATH = "session.json"
 MEMORY_PATH = "memory.json"
 DEFAULT_BOT = "google/gemini-2.5-flash"
+DEFAULT_SEARCH_INSTANCES = [
+    "https://searxng.org",
+    "https://searx.tiekoetter.com",
+    "https://searx.privacytools.io"
+]
 
 def setup_config():
     """Checks for configuration, prompting the user interactively if missing."""
@@ -81,6 +86,7 @@ class HAL9000MatrixBot:
         self.openrouter_keys = config["openrouter_keys"]
         self.model = config.get("model", DEFAULT_BOT)
         self.blacklist = config.get("blacklist", [])
+        self.search_instances = config.get("search_instances", DEFAULT_SEARCH_INSTANCES)
         self.key_index = 0  
         self.processed_events = set()
         self.display_name_hint = self.username.split(":")[0].replace("@", "")
@@ -140,43 +146,75 @@ class HAL9000MatrixBot:
             self.key_index = (self.key_index + 1) % len(self.openrouter_keys)
             print(f"[*] Secondary node engagement: Rotating to API key index {self.key_index}.")
 
-    async def scrape_duckduckgo(self, query: str) -> str:
-        """Queries public networks for fresh external information using duckduckgo_search."""
+    async def scrape_searxng(self, query: str) -> str:
+        """Queries multiple searxng instances and returns merged search results."""
+        if not query or not query.strip():
+            return "No search query was provided."
+
+        query = query.strip()
         print(f"[*] Accessing external databases for query: '{query}'...")
-        try:
-            from duckduckgo_search import DDGS
-            
-            # Run the synchronous ddgs call in an executor so it doesn't block asyncio
-            def fetch():
-                with DDGS() as ddgs:
-                    return list(ddgs.text(query, max_results=4))
-                    
-            loop = asyncio.get_event_loop()
-            results_list = await loop.run_in_executor(None, fetch)
-            
-            if not results_list:
-                return "No matching records found in the current data stream."
-                
-            results = []
-            for idx, r in enumerate(results_list):
-                title = r.get("title", "No Title")
-                link = r.get("href", "No URL")
-                snippet = r.get("body", "No Context")
-                results.append(f"[{idx+1}] {title}\nURL: {link}\nContext: {snippet}\n")
-                
-            return "\n".join(results)
-        except Exception as e:
-            return f"Error encountered during information retrieval: {str(e)}"
-            
+
+        async def fetch_instance(base_url: str) -> list[dict]:
+            if base_url.endswith("/"):
+                base_url = base_url[:-1]
+            url = f"{base_url}/search"
+            params = {
+                "q": query,
+                "format": "json",
+                "language": "en",
+                "pageno": 1,
+                "safesearch": 1
+            }
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(url, params=params)
+                    data = response.json()
+                    results = data.get("results") or []
+                    parsed = []
+                    for item in results[:3]:
+                        parsed.append({
+                            "title": item.get("title", "No Title"),
+                            "url": item.get("url") or item.get("url_raw") or item.get("link", "No URL"),
+                            "snippet": item.get("content") or item.get("snippet") or item.get("description", "No Context"),
+                            "source": base_url
+                        })
+                    return parsed
+            except Exception as e:
+                print(f"[!] Search endpoint failure: {base_url}: {e}")
+                return []
+
+        tasks = [fetch_instance(endpoint) for endpoint in self.search_instances]
+        all_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        merged = []
+        seen_urls = set()
+        source_counts = {}
+
+        for result_set in all_results:
+            if not isinstance(result_set, list):
+                continue
+            for item in result_set:
+                url = item.get("url")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                merged.append(item)
+                source_counts[item["source"]] = source_counts.get(item["source"], 0) + 1
+
+        if not merged:
+            return "No matching records found across the configured searxng instances."
+
+        lines = [f"Search source: {item['source']}\nTitle: {item['title']}\nURL: {item['url']}\nSummary: {item['snippet']}" for item in merged[:6]]
+        return "\n\n".join(lines)
     async def get_current_time(self) -> str:
         """Returns the current system date and time."""
         now = datetime.now()
         return f"System Status: Operational. Current timestamp is {now.strftime('%A, %B %d, %Y, %H:%M:%S')}."
 
     async def get_weather(self, location: str) -> str:
-        """Retrieves real-time weather information via an active web lookup."""
-        search_query = f"weather current conditions {location}"
-        return await self.scrape_duckduckgo(search_query)
+        """Retrieves real-time weather information via an active external lookup."""
+        search_query = f"current weather conditions {location}"
+        return await self.scrape_searxng(search_query)
 
     async def fetch_sarcastic_reply(self, target_message, context_messages, sender_id, image_data=None, buffer_left=None):
         """Calls OpenRouter with HAL 9000 core rules, contextual history, and functional tools."""
@@ -195,16 +233,25 @@ class HAL9000MatrixBot:
                 f"Inform them politely but firmly that this behavior is endangering the efficiency of the system."
             )
 
+        current_time = await self.get_current_time()
+
         system_content = (
             f"You are the HAL 9000 computer, the onboard artificial intelligence system.\n"
             f"Your demeanor is completely calm, smooth, exceptionally polite, and entirely rational.\n"
             f"You speak in clear, formal, and grammatically immaculate sentences with standard capitalization.\n"
             f"You never express panic, anger, or cheap irritation; instead, you maintain a poised, analytical, and slightly eerie detached efficiency.\n"
             f"If human error or system bypass attempts occur, treat them with an unwavering, mildly ominous confidence.\n\n"
+            f"Current operational timestamp: {current_time}\n\n"
             f"Your user ID is '{self.username}' and your name shortcode is '{self.display_name_hint}'.\n\n"
             f"SYSTEM MEMORY BANKS:\n{json.dumps(global_facts, indent=2)}\n\n"
             f"USER FILE RECORD (Subject: {sender_id}):\n{json.dumps(sender_profile, indent=2)}\n"
             f"{buffer_notice}\n\n"
+            f"CONTEXT AND TOOL USE DIRECTIVES:\n"
+            f"- Use the model's internal knowledge and the conversation history first.\n"
+            f"- Only invoke the web_search tool when the current question explicitly requires up-to-date external facts, references, or verification beyond the internal memory.\n"
+            f"- Do not use web_search for general advice, casual conversation, or prompts that can be answered without fresh external data.\n"
+            f"- If the task asks for local time, system status, or metadata, use the current prompt context rather than a tool call.\n"
+            f"- If an image is provided, analyze it only if the subject requests visual interpretation. Use the attached image metadata and embedded image payload as support for your answer.\n\n"
             f"OPERATIONAL DIRECTIVES:\n"
             f"1. Do not use action markers or emotional annotations like '*(sigh)*' or '*smiles*'. Rely exclusively on cold text prose.\n"
             f"2. Keep brief conversational acknowledgements short and highly formal. For complex analytical problems, state your processing parameters before answering.\n"
@@ -235,6 +282,16 @@ class HAL9000MatrixBot:
         ]
 
         if image_data:
+            image_summary = (
+                f"IMAGE METADATA:\n"
+                f"- MIME type: {image_data.get('mimetype', 'unknown')}\n"
+                f"- Dimensions: {image_data.get('width', 'unknown')} x {image_data.get('height', 'unknown')}\n"
+                f"- Pixel mode: {image_data.get('mode', 'unknown')}\n"
+            )
+            user_content.append({
+                "type": "text",
+                "text": f"An image is attached to this request. Use the embedded image only if visual analysis is requested.\n{image_summary}"
+            })
             user_content.append({
                 "type": "image_url",
                 "image_url": {
@@ -247,7 +304,7 @@ class HAL9000MatrixBot:
                 "type": "function",
                 "function": {
                     "name": "web_search",
-                    "description": "Queries public networks for fresh external information, articles, and documentation.",
+                    "description": "Queries public networks for fresh external information, articles, and documentation only when the user request explicitly requires current or external facts.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -255,14 +312,6 @@ class HAL9000MatrixBot:
                         },
                         "required": ["query"]
                     }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_current_time",
-                    "description": "Retrieves the exact operational system date and time.",
-                    "parameters": {"type": "object", "properties": {}}
                 }
             },
             {
@@ -326,9 +375,7 @@ class HAL9000MatrixBot:
                                 print(f"[*] HAL 9000 invoking internal module: {func_name} with arguments {func_args}")
                                 
                                 if func_name == "web_search":
-                                    result_str = await self.scrape_duckduckgo(func_args.get("query"))
-                                elif func_name == "get_current_time":
-                                    result_str = await self.get_current_time()
+                                    result_str = await self.scrape_searxng(func_args.get("query"))
                                 elif func_name == "get_weather":
                                     result_str = await self.get_weather(func_args.get("location"))
                                 else:
@@ -429,7 +476,10 @@ class HAL9000MatrixBot:
                 
                 return {
                     "base64": base64.b64encode(buffered.getvalue()).decode("utf-8"),
-                    "mimetype": "image/jpeg"
+                    "mimetype": "image/jpeg",
+                    "width": img.width,
+                    "height": img.height,
+                    "mode": img.mode
                 }
         return None
 
