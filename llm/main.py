@@ -141,39 +141,33 @@ class HAL9000MatrixBot:
             print(f"[*] Secondary node engagement: Rotating to API key index {self.key_index}.")
 
     async def scrape_duckduckgo(self, query: str) -> str:
-        """Public, auth-free web search tool querying DuckDuckGo's static endpoint cleanly."""
+        """Queries public networks for fresh external information using duckduckgo_search."""
         print(f"[*] Accessing external databases for query: '{query}'...")
-        url = "https://html.duckduckgo.com/html/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        data = {"q": query}
-        
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, data=data, headers=headers, timeout=15.0)
-                if response.status_code != 200:
-                    return f"Error: External database returned status code {response.status_code}."
-                
-                soup = BeautifulSoup(response.text, "html.parser")
-                results = []
-                for idx, result in enumerate(soup.select(".result__body")[:4]):
-                    title_elem = result.select_one(".result__title a")
-                    snippet_elem = result.select_one(".result__snippet")
+            from duckduckgo_search import DDGS
+            
+            # Run the synchronous ddgs call in an executor so it doesn't block asyncio
+            def fetch():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=4))
                     
-                    if title_elem and snippet_elem:
-                        title = title_elem.get_text(strip=True)
-                        link = title_elem.get("href")
-                        snippet = snippet_elem.get_text(strip=True)
-                        results.append(f"[{idx+1}] {title}\nURL: {link}\nContext: {snippet}\n")
+            loop = asyncio.get_event_loop()
+            results_list = await loop.run_in_executor(None, fetch)
+            
+            if not results_list:
+                return "No matching records found in the current data stream."
                 
-                if not results:
-                    return "No matching records found in the current data stream."
+            results = []
+            for idx, r in enumerate(results_list):
+                title = r.get("title", "No Title")
+                link = r.get("href", "No URL")
+                snippet = r.get("body", "No Context")
+                results.append(f"[{idx+1}] {title}\nURL: {link}\nContext: {snippet}\n")
                 
-                return "\n".join(results)
+            return "\n".join(results)
         except Exception as e:
             return f"Error encountered during information retrieval: {str(e)}"
-
+            
     async def get_current_time(self) -> str:
         """Returns the current system date and time."""
         now = datetime.now()
