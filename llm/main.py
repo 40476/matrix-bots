@@ -300,11 +300,11 @@ class HAL9000MatrixBot:
             f"USER FILE RECORD (Subject: {sender_id}):\n{json.dumps(sender_profile, indent=2)}\n"
             f"{buffer_notice}\n\n"
             f"CONTEXT AND TOOL USE DIRECTIVES:\n"
-            f"- Use the model's internal knowledge and the conversation history first.\n"
-            f"- Only invoke the web_search tool when the current question explicitly requires up-to-date external facts, references, or verification beyond the internal memory.\n"
-            f"- Do not use web_search for general advice, casual conversation, or prompts that can be answered without fresh external data.\n"
-            f"- If the task asks for local time, system status, or metadata, use the current prompt context rather than a tool call.\n"
-            f"- If an image is provided, analyze it only if the subject requests visual interpretation. Use the attached image metadata and embedded image payload as support for your answer.\n\n"
+            f"- Use the model's internal knowledge, the provided conversation history, and embedded context first.\n"
+            f"- Never call the web_search tool for general questions, how-to instructions, opinions, or conversational replies unless the user explicitly requests a live internet search or current external evidence.\n"
+            f"- Only invoke the web_search tool when the request clearly demands current, up-to-date facts, external verification, or citations from the public web.\n"
+            f"- If the task asks for local time, system status, or internal reasoning, do not use any web-based tool. Use the current prompt context instead.\n"
+            f"- If an image is provided, analyze it only when the subject explicitly asks for visual interpretation. Use the attached image metadata and embedded image payload as support when doing so.\n\n"
             f"OPERATIONAL DIRECTIVES:\n"
             f"1. Do not use action markers or emotional annotations like '*(sigh)*' or '*smiles*'. Rely exclusively on cold text prose.\n"
             f"2. Keep brief conversational acknowledgements short and highly formal. For complex analytical problems, state your processing parameters before answering.\n"
@@ -394,7 +394,7 @@ class HAL9000MatrixBot:
                             {"role": "system", "content": system_content},
                             {"role": "user", "content": user_content}
                         ],
-                        # "tools": tools,
+                        "tools": tools,
                         "response_format": {"type": "json_object"},
                         "max_tokens": requested_max_tokens
                     }
