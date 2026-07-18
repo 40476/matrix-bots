@@ -24,9 +24,9 @@ SESSION_PATH = "session.json"
 MEMORY_PATH = "memory.json"
 DEFAULT_BOT = "google/gemini-2.5-flash"
 DEFAULT_SEARCH_INSTANCES = [
-    "https://searxng.org",
     "https://searx.tiekoetter.com",
-    "https://searx.privacytools.io"
+    "https://searx.kavin.rocks",
+    "https://searx.be"
 ]
 
 def setup_config():
@@ -154,6 +154,26 @@ class HAL9000MatrixBot:
         query = query.strip()
         print(f"[*] Accessing external databases for query: '{query}'...")
 
+        def parse_searx_html(html: str, source: str) -> list[dict]:
+            parsed = []
+            soup = BeautifulSoup(html, "html.parser")
+            for result in soup.select("div.result")[:6]:
+                link = result.select_one("a.result__a") or result.select_one("a")
+                if not link:
+                    continue
+                href = link.get("href")
+                title = link.get_text(strip=True) or "No Title"
+                snippet_el = result.select_one(".result__snippet, .snippet, .result__content")
+                snippet = snippet_el.get_text(strip=True) if snippet_el else "No Context"
+                if href:
+                    parsed.append({
+                        "title": title,
+                        "url": href,
+                        "snippet": snippet,
+                        "source": source
+                    })
+            return parsed
+
         async def fetch_instance(base_url: str) -> list[dict]:
             if base_url.endswith("/"):
                 base_url = base_url[:-1]
@@ -168,17 +188,24 @@ class HAL9000MatrixBot:
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     response = await client.get(url, params=params)
-                    data = response.json()
-                    results = data.get("results") or []
-                    parsed = []
-                    for item in results[:3]:
-                        parsed.append({
-                            "title": item.get("title", "No Title"),
-                            "url": item.get("url") or item.get("url_raw") or item.get("link", "No URL"),
-                            "snippet": item.get("content") or item.get("snippet") or item.get("description", "No Context"),
-                            "source": base_url
-                        })
-                    return parsed
+                    if response.status_code != 200:
+                        print(f"[!] Search endpoint failure: {base_url}: HTTP {response.status_code}")
+                        return []
+                    content_type = response.headers.get("content-type", "")
+                    if "application/json" in content_type:
+                        data = response.json()
+                        results = data.get("results") or []
+                        parsed = []
+                        for item in results[:3]:
+                            parsed.append({
+                                "title": item.get("title", "No Title"),
+                                "url": item.get("url") or item.get("url_raw") or item.get("link", "No URL"),
+                                "snippet": item.get("content") or item.get("snippet") or item.get("description", "No Context"),
+                                "source": base_url
+                            })
+                        return parsed
+                    else:
+                        return parse_searx_html(response.text, base_url)
             except Exception as e:
                 print(f"[!] Search endpoint failure: {base_url}: {e}")
                 return []
@@ -188,7 +215,6 @@ class HAL9000MatrixBot:
 
         merged = []
         seen_urls = set()
-        source_counts = {}
 
         for result_set in all_results:
             if not isinstance(result_set, list):
@@ -199,13 +225,37 @@ class HAL9000MatrixBot:
                     continue
                 seen_urls.add(url)
                 merged.append(item)
-                source_counts[item["source"]] = source_counts.get(item["source"], 0) + 1
 
         if not merged:
-            return "No matching records found across the configured searxng instances."
+            return await self.fallback_search(query)
 
         lines = [f"Search source: {item['source']}\nTitle: {item['title']}\nURL: {item['url']}\nSummary: {item['snippet']}" for item in merged[:6]]
         return "\n\n".join(lines)
+
+    async def fallback_search(self, query: str) -> str:
+        """Fallback search using DuckDuckGo when searxng instances fail."""
+        print(f"[*] Falling back to DuckDuckGo search for query: '{query}'...")
+        try:
+            from duckduckgo_search import DDGS
+
+            def fetch():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=4))
+
+            loop = asyncio.get_event_loop()
+            results_list = await loop.run_in_executor(None, fetch)
+            if not results_list:
+                return "No matching records found in fallback search."
+            lines = []
+            for idx, item in enumerate(results_list, start=1):
+                title = item.get("title", "No Title")
+                link = item.get("href", "No URL")
+                snippet = item.get("body", "No Context")
+                lines.append(f"Fallback result {idx}: {title}\nURL: {link}\nSummary: {snippet}")
+            return "\n\n".join(lines)
+        except Exception as e:
+            return f"Search fallback failed: {e}"
+
     async def get_current_time(self) -> str:
         """Returns the current system date and time."""
         now = datetime.now()
