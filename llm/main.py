@@ -356,7 +356,7 @@ class HAL9000MatrixBot:
                             }
                             
                             tool_response = await client.post(
-                                url="[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+                                url="https://openrouter.ai/api/v1/chat/completions",
                                 headers={
                                     "Authorization": f"Bearer {api_key}",
                                     "Content-Type": "application/json",
