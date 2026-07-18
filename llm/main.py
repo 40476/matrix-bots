@@ -236,7 +236,10 @@ class HAL9000MatrixBot:
         """Fallback search using DuckDuckGo when searxng instances fail."""
         print(f"[*] Falling back to DuckDuckGo search for query: '{query}'...")
         try:
-            from duckduckgo_search import DDGS
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
 
             def fetch():
                 with DDGS() as ddgs:
