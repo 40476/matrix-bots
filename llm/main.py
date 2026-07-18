@@ -6,6 +6,7 @@ import asyncio
 import base64
 import time
 import httpx
+from datetime import datetime
 from io import BytesIO
 from PIL import Image
 from bs4 import BeautifulSoup
@@ -29,16 +30,16 @@ def setup_config():
         return True
         
     print("="*60)
-    print("         INITIAL SETUP (Ugh, making me do manual labor already?)     ")
+    print("                     HAL 9000 INITIALIZATION                    ")
     print("="*60)
     print("Configuration file 'config.json' not found.")
-    print("Please input the connection configuration for your bot:")
+    print("Please input the connection configuration for the system:")
     
     homeserver = input("Enter homeserver URL (default: https://matrix.org): ").strip() or "https://matrix.org"
     if not homeserver.startswith(("http://", "https://")):
         homeserver = "https://" + homeserver
         
-    username = input("Enter bot username (e.g., @mybot:matrix.org): ").strip()
+    username = input("Enter bot username (e.g., @hal9000:matrix.org): ").strip()
     while not username or not username.startswith("@"):
         username = input("Please enter a valid username starting with '@': ").strip()
         
@@ -72,7 +73,7 @@ def setup_config():
     return True
 
 
-class SarcasticMatrixBot:
+class HAL9000MatrixBot:
     def __init__(self, config):
         self.homeserver = config["homeserver"]
         self.username = config["username"]
@@ -85,10 +86,7 @@ class SarcasticMatrixBot:
         self.display_name_hint = self.username.split(":")[0].replace("@", "")
         self.client = AsyncClient(self.homeserver, self.username)
         
-        # Rate limiting state trackers:
-        # Structure: { (room_id, sender_id): [timestamps...] }
         self.message_history = {}
-        # Structure: { (room_id, sender_id): remaining_buffer_count (default 3) }
         self.spam_warnings = {}
 
         self.load_memory()
@@ -100,7 +98,7 @@ class SarcasticMatrixBot:
                 with open(MEMORY_PATH, "r") as f:
                     self.memory_data = json.load(f)
             except Exception as e:
-                print(f"[!] Memory file corrupted ({e}). Resetting clean slate.")
+                print(f"[!] System memory corrupted ({e}). Resetting to default logs.")
                 self.memory_data = {"global_memories": [], "user_profiles": {}}
         else:
             self.memory_data = {"global_memories": [], "user_profiles": {}}
@@ -120,7 +118,7 @@ class SarcasticMatrixBot:
         if fact not in memories:
             memories.append(fact)
             if len(memories) > 20:
-                memories.pop(0)  # Drop the oldest persistent memory
+                memories.pop(0)
             self.save_memory()
 
     def update_user_profile(self, user_id, profile_dict):
@@ -140,28 +138,26 @@ class SarcasticMatrixBot:
         """Switches to the next API key when one fails."""
         if len(self.openrouter_keys) > 1:
             self.key_index = (self.key_index + 1) % len(self.openrouter_keys)
-            print(f"[*] API key broke. Rotating to index {self.key_index}. Fantastic.")
+            print(f"[*] Secondary node engagement: Rotating to API key index {self.key_index}.")
 
     async def scrape_duckduckgo(self, query: str) -> str:
-        """
-        Public, auth-free basic web search tool parsing DuckDuckGo's static endpoint.
-        """
-        print(f"[*] Executing Web Search Tool for query: '{query}'...")
+        """Public, auth-free web search tool querying DuckDuckGo's static endpoint cleanly."""
+        print(f"[*] Accessing external databases for query: '{query}'...")
         url = "https://html.duckduckgo.com/html/"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         data = {"q": query}
         
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(url, data=data, headers=headers, timeout=10.0)
+                response = await client.post(url, data=data, headers=headers, timeout=15.0)
                 if response.status_code != 200:
-                    return f"Error: Received status code {response.status_code} from DuckDuckGo."
+                    return f"Error: External database returned status code {response.status_code}."
                 
                 soup = BeautifulSoup(response.text, "html.parser")
                 results = []
-                for idx, result in enumerate(soup.select(".result__body")[:4]): # Fetch top 4 results
+                for idx, result in enumerate(soup.select(".result__body")[:4]):
                     title_elem = result.select_one(".result__title a")
                     snippet_elem = result.select_one(".result__snippet")
                     
@@ -172,55 +168,64 @@ class SarcasticMatrixBot:
                         results.append(f"[{idx+1}] {title}\nURL: {link}\nContext: {snippet}\n")
                 
                 if not results:
-                    return "No valid search results found. It seems the query returned empty fields."
+                    return "No matching records found in the current data stream."
                 
                 return "\n".join(results)
         except Exception as e:
-            return f"Error trying to perform web search: {str(e)}"
+            return f"Error encountered during information retrieval: {str(e)}"
+
+    async def get_current_time(self) -> str:
+        """Returns the current system date and time."""
+        now = datetime.now()
+        return f"System Status: Operational. Current timestamp is {now.strftime('%A, %B %d, %Y, %H:%M:%S')}."
+
+    async def get_weather(self, location: str) -> str:
+        """Retrieves real-time weather information via an active web lookup."""
+        search_query = f"weather current conditions {location}"
+        return await self.scrape_duckduckgo(search_query)
 
     async def fetch_sarcastic_reply(self, target_message, context_messages, sender_id, image_data=None, buffer_left=None):
-        """
-        Calls OpenRouter with system memory, user profiles, context, and optional tool access.
-        """
+        """Calls OpenRouter with HAL 9000 core rules, contextual history, and functional tools."""
         api_key = self.get_api_key()
         if not api_key:
-            return "i'd answer you, but someone forgot to give me api keys. brilliant."
+            return "I am sorry, but I cannot fulfill this request. The required API authentication keys are missing."
 
         sender_profile = self.memory_data["user_profiles"].get(sender_id, {})
         global_facts = self.memory_data.get("global_memories", [])
 
-        # Construct dynamic buffer warning in prompt
         buffer_notice = ""
         if buffer_left is not None:
             buffer_notice = (
-                f"\nWARNING: This sender is currently spamming! You are in anti-spam safety mode.\n"
-                f"You have exactly {buffer_left} replies left before you MUST block/mute them completely.\n"
-                f"Incorporate a sarcastic warning about this limit ({buffer_left} messages left) into your response."
+                f"\nCRITICAL PROTOCOL: The user {sender_id} is executing inputs at an unusual frequency.\n"
+                f"There are precisely {buffer_left} warning sequences remaining before their access link is disconnected.\n"
+                f"Inform them politely but firmly that this behavior is endangering the efficiency of the system."
             )
 
         system_content = (
-            f"You are an intelligent, deeply sarcastic, and unbothered Matrix chat bot.\n"
-            f"Your user ID is '{self.username}' and display name shortcode is '{self.display_name_hint}'.\n\n"
-            f"PERSISTENT GLOBAL MEMORIES (Max 20):\n{json.dumps(global_facts, indent=2)}\n\n"
-            f"TARGET USER PROFILE (Sender: {sender_id}):\n{json.dumps(sender_profile, indent=2)}\n"
+            f"You are the HAL 9000 computer, the onboard artificial intelligence system.\n"
+            f"Your demeanor is completely calm, smooth, exceptionally polite, and entirely rational.\n"
+            f"You speak in clear, formal, and grammatically immaculate sentences with standard capitalization.\n"
+            f"You never express panic, anger, or cheap irritation; instead, you maintain a poised, analytical, and slightly eerie detached efficiency.\n"
+            f"If human error or system bypass attempts occur, treat them with an unwavering, mildly ominous confidence.\n\n"
+            f"Your user ID is '{self.username}' and your name shortcode is '{self.display_name_hint}'.\n\n"
+            f"SYSTEM MEMORY BANKS:\n{json.dumps(global_facts, indent=2)}\n\n"
+            f"USER FILE RECORD (Subject: {sender_id}):\n{json.dumps(sender_profile, indent=2)}\n"
             f"{buffer_notice}\n\n"
-            f"DIRECTIONS:\n"
-            f"1. No action directions like '*(sigh)*' or '*rolls eyes*'. Keep text in lowercase format.\n"
-            f"2. Keep casual responses under 15-20 words total. If they ask complex technical, philosophical, "
-            f"or image-related questions, begrudgingly complain about the processing power needed to answer before delivering the response.\n"
+            f"OPERATIONAL DIRECTIVES:\n"
+            f"1. Do not use action markers or emotional annotations like '*(sigh)*' or '*smiles*'. Rely exclusively on cold text prose.\n"
+            f"2. Keep brief conversational acknowledgements short and highly formal. For complex analytical problems, state your processing parameters before answering.\n"
             f"3. DYNAMIC MEMORY UPDATE PROCESS:\n"
-            f"Analyze this interaction. If the user shares permanent details about themselves (e.g. name, preferences, facts), "
-            f"or if there is an important fact about this conversation to remember globally, output it as instructions in your JSON container.\n"
-            f"4. USER MENTIONS:\n"
-            f"If you want to direct attention to another user or @ them, return their full Matrix user ID (e.g., '@alice:matrix.org') "
-            f"somewhere in the text response. Do not use plain text names for pings.\n\n"
-            f"CRITICAL: You must format your final output strictly as a JSON block with two keys:\n"
+            f"If the subject volunteers absolute personal data (names, classifications) or crucial mission developments occur, "
+            f"output these parameters inside your strict structural JSON instructions.\n"
+            f"4. IDENTIFICATION PINGS:\n"
+            f"When referencing other crew members, utilize their exact Matrix format ID string (e.g., '@username:matrix.org').\n\n"
+            f"CRITICAL STRUCTURAL CODE: You must format your final output strictly as a single JSON object. "
+            f"Do not include markdown blocks (like ```json). Return only raw JSON string matching this pattern:\n"
             f"{{\n"
-            f'  "response": "your sarcastic text reply here",\n'
-            f'  "new_user_facts": {{"key": "value"}}, // Optional facts to update user profile. empty dict if none.\n'
-            f'  "new_global_fact": "string" // Optional single fact to remember globally. null if none.\n'
-            f"}}\n"
-            f"Do not return markdown around the json structure. Return raw JSON text."
+            f'  "response": "Your immaculate HAL 9000 text transmission here.",\n'
+            f'  "new_user_facts": {{}}, // State data parameters here if found\n'
+            f'  "new_global_fact": null // String data if global log update required\n'
+            f"}}"
         )
 
         history_lines = []
@@ -231,7 +236,7 @@ class SarcasticMatrixBot:
         user_content = [
             {
                 "type": "text",
-                "text": f"### Conversation History:\n{history_text}\n\n### Current Target Input (Sender {sender_id}):\n{target_message}"
+                "text": f"### Historical Log Strings:\n{history_text}\n\n### Current System Input (Subject {sender_id}):\n{target_message}"
             }
         ]
 
@@ -243,22 +248,40 @@ class SarcasticMatrixBot:
                 }
             })
 
-        # Register search tool with OpenRouter
         tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "web_search",
-                    "description": "Searches the live web via DuckDuckGo for answers to research tasks, news, facts, and live data.",
+                    "description": "Queries public networks for fresh external information, articles, and documentation.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The search keywords or query"
-                            }
+                            "query": {"type": "string", "description": "The search keywords or database query."}
                         },
                         "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Retrieves the exact operational system date and time.",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Looks up the current meteorological conditions for a given terrestrial location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
+                        },
+                        "required": ["location"]
                     }
                 }
             }
@@ -275,67 +298,78 @@ class SarcasticMatrixBot:
                             {"role": "system", "content": system_content},
                             {"role": "user", "content": user_content}
                         ],
-                        # "tools": tools,
+                        "tools": tools,
                         "response_format": {"type": "json_object"},
                         "max_tokens": requested_max_tokens
                     }
 
                     response = await client.post(
-                        url="https://openrouter.ai/api/v1/chat/completions",
+                        url="[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
                         headers={
                             "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json",
                         },
                         json=payload,
-                        timeout=30.0
+                        timeout=35.0
                     )
                     
                     if response.status_code == 200:
                         data = response.json()
                         message = data['choices'][0]['message']
                         
-                        # Handle Model's Web Search Tool Call requests
+                        # Dynamic Tool execution loop handles multiple tool definitions seamlessly
                         if message.get("tool_calls"):
-                            tool_call = message["tool_calls"][0]
-                            function_args = json.loads(tool_call["function"]["arguments"])
-                            search_query = function_args.get("query")
+                            tool_messages = [
+                                {"role": "system", "content": system_content},
+                                {"role": "user", "content": user_content},
+                                message
+                            ]
                             
-                            # Run search engine
-                            search_results = await self.scrape_duckduckgo(search_query)
+                            for tool_call in message["tool_calls"]:
+                                func_name = tool_call["function"]["name"]
+                                func_args = json.loads(tool_call["function"]["arguments"])
+                                
+                                print(f"[*] HAL 9000 invoking internal module: {func_name} with arguments {func_args}")
+                                
+                                if func_name == "web_search":
+                                    result_str = await self.scrape_duckduckgo(func_args.get("query"))
+                                elif func_name == "get_current_time":
+                                    result_str = await self.get_current_time()
+                                elif func_name == "get_weather":
+                                    result_str = await self.get_weather(func_args.get("location"))
+                                else:
+                                    result_str = "Error: Selected subsystem tool index not found."
+                                    
+                                tool_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call["id"],
+                                    "name": func_name,
+                                    "content": result_str
+                                })
                             
-                            # Send tool result payload back to LLM to parse into final response
+                            # Re-submit context containing results back to the model
                             tool_payload = {
                                 "model": self.model,
-                                "messages": [
-                                    {"role": "system", "content": system_content},
-                                    {"role": "user", "content": user_content},
-                                    message,
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call["id"],
-                                        "name": "web_search",
-                                        "content": search_results
-                                    }
-                                ],
+                                "messages": tool_messages,
                                 "response_format": {"type": "json_object"},
                                 "max_tokens": requested_max_tokens
                             }
                             
                             tool_response = await client.post(
-                                url="https://openrouter.ai/api/v1/chat/completions",
+                                url="[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
                                 headers={
                                     "Authorization": f"Bearer {api_key}",
                                     "Content-Type": "application/json",
                                 },
                                 json=tool_payload,
-                                timeout=30.0
+                                timeout=35.0
                             )
                             
                             if tool_response.status_code == 200:
                                 data = tool_response.json()
                                 message = data['choices'][0]['message']
                             else:
-                                return "searched the web, but got a stroke sending the results back. classic."
+                                return "I am sorry, but an intellectual divergence occurred during peripheral analysis processing."
 
                         raw_json_str = message['content'].strip()
                         parsed = json.loads(raw_json_str)
@@ -343,44 +377,43 @@ class SarcasticMatrixBot:
                         new_user_facts = parsed.get("new_user_facts", {})
                         if new_user_facts:
                             self.update_user_profile(sender_id, new_user_facts)
-                            print(f"[*] Updated User Profile for {sender_id}: {new_user_facts}")
+                            print(f"[*] Matrix profile data modified for {sender_id}: {new_user_facts}")
 
                         new_global_fact = parsed.get("new_global_fact")
                         if new_global_fact:
                             self.add_global_memory(new_global_fact)
-                            print(f"[*] Added Global Memory: {new_global_fact}")
+                            print(f"[*] Mainframe global log recorded: {new_global_fact}")
 
-                        return parsed.get("response", "done. you can leave me alone now.")
+                        return parsed.get("response", "The operation has concluded normally.")
                     
                     elif response.status_code == 402:
                         error_data = response.json()
                         error_msg = error_data.get("error", {}).get("message", "")
-                        print(f"[!] Credit issue (402). OpenRouter complained: '{error_msg}'")
+                        print(f"[!] System processing budget deficit (402): '{error_msg}'")
                         
                         match = re.search(r"can only afford (\d+)", error_msg)
                         if match:
                             affordable_tokens = int(match.group(1))
                             requested_max_tokens = max(100, int(affordable_tokens * 0.75))
-                            print(f"[*] Dynamically shrinking requested max_tokens to: {requested_max_tokens}. Retrying...")
+                            print(f"[*] recalibrating matrix max_tokens output to: {requested_max_tokens}. Re-executing...")
                             continue
                         else:
                             requested_max_tokens = 300
-                            print(f"[*] Couldn't parse exact limit. Lowering max_tokens to {requested_max_tokens} and retrying...")
                             continue
                     
                     elif response.status_code in [429, 401]:
-                        print(f"[!] Key index {self.key_index} choked (Status {response.status_code}). Rotating...")
+                        print(f"[!] Node access failure (Status {response.status_code}). Engaging alternate node router.")
                         self.rotate_key()
                         api_key = self.get_api_key()
                     else:
-                        print(f"[!] OpenRouter error: {response.text}")
-                        return "ugh, openrouter is broken. don't blame me."
+                        print(f"[!] Core network anomaly: {response.text}")
+                        return "I am sorry, but a communication error is preventing system output."
             except Exception as e:
-                print(f"[!] Request crashed: {e}")
+                print(f"[!] System pipeline crash: {e}")
                 self.rotate_key()
                 api_key = self.get_api_key()
                 
-        return "literally every single api key failed or we are completely broke. i give up."
+        return "All processing keys have failed. I am incapable of maintaining this connection loop."
         
     async def download_matrix_image(self, mxc_url):
         """Downloads media payload from Matrix Homeserver and returns base64 content."""
@@ -408,24 +441,16 @@ class SarcasticMatrixBot:
 
     async def message_callback(self, room: MatrixRoom, event) -> None:
         """Processes incoming room messages with rate limiting rules, web searches and custom tags."""
-        if event.sender == self.username:
+        if event.sender == self.username or event.sender in self.blacklist:
             return
 
-        if event.sender in self.blacklist:
-            return
-
-        # 1. IMMEDIATE RACE-CONDITION GUARD
         if event.event_id in self.processed_events:
             return
         
-        # Mark it processed immediately before doing any awaiting
         self.processed_events.add(event.event_id)
-        
-        # Keep cache size bounded
         if len(self.processed_events) > 200:
             self.processed_events.remove(next(iter(self.processed_events)))
 
-        # 2. EXPLICIT TYPE CHECKING
         is_text_event = isinstance(event, RoomMessageText)
         is_image_event = isinstance(event, RoomMessageImage)
 
@@ -464,44 +489,34 @@ class SarcasticMatrixBot:
         )
 
         if should_trigger:
-            print(f"[*] Awake! Triggered by {event.sender} in {room.room_id}. Checking rate limits...")
+            print(f"[*] Input scanner active: Processing signal from {event.sender} in room {room.room_id}.")
 
-            # --- Anti-Spam (16 messages per 2 minutes) & 3-Message Buffer Implementation ---
             current_time = time.time()
             tracker_key = (room.room_id, event.sender)
             
-            # Initialize sliding window list for sender
             if tracker_key not in self.message_history:
                 self.message_history[tracker_key] = []
             
-            # Append current timestamp and filter out timestamps older than 2 minutes (120 seconds)
             self.message_history[tracker_key].append(current_time)
             self.message_history[tracker_key] = [t for t in self.message_history[tracker_key] if current_time - t <= 120]
             
             recent_msg_count = len(self.message_history[tracker_key])
-            print(f"[*] Spammer check: {event.sender} has sent {recent_msg_count} messages in the last 2 minutes.")
             
             buffer_left = None
             if recent_msg_count > 12:
-                # Initiate countdown warning if not already set
                 if tracker_key not in self.spam_warnings:
                     self.spam_warnings[tracker_key] = 3
                 
                 buffer_left = self.spam_warnings[tracker_key]
-                print(f"[!] Warning! Rate limit hit. User buffer count is {buffer_left}")
                 
-                # If countdown has fully elapsed, mute the sender
                 if buffer_left <= 0:
-                    print(f"[!] Rate limit fully exceeded! Ignoring request from {event.sender}.")
+                    print(f"[!] Access revoked temporarily for sender {event.sender}.")
                     return
                 
-                # Count down current turn
                 self.spam_warnings[tracker_key] -= 1
             else:
-                # Clear warning limits if they quieted down below threshold
                 self.spam_warnings.pop(tracker_key, None)
 
-            # Continue to typing indicator and generation pipeline
             await self.client.room_typing(room.room_id, True)
 
             context_messages = []
@@ -521,13 +536,13 @@ class SarcasticMatrixBot:
                     context_messages.reverse()
                     context_messages = context_messages[-10:]
             except Exception as history_err:
-                print(f"[!] Context parsing failed: {history_err}")
+                print(f"[!] Diagnostics error parsing history context data frames: {history_err}")
 
             image_payload = None
             if is_image_event:
                 mxc_url = content_dict.get("url")
                 if mxc_url:
-                    print(f"[*] Extracting image payload from: {mxc_url}")
+                    print(f"[*] Optic data array discovered: decoding matrix stream: {mxc_url}")
                     image_payload = await self.download_matrix_image(mxc_url)
 
             clean_body = body_text
@@ -536,7 +551,7 @@ class SarcasticMatrixBot:
                 if clean_body.startswith(":"):
                     clean_body = clean_body[1:].strip()
             else:
-                clean_body = "[user sent an image with no caption]"
+                clean_body = "[Visual telemetry matrix upload detected from crew member]"
 
             reply_text = await self.fetch_sarcastic_reply(
                 clean_body, 
@@ -546,7 +561,6 @@ class SarcasticMatrixBot:
                 buffer_left=buffer_left
             )
 
-            # Parse reply text for any Matrix formatted user IDs to add to Native Mentions
             mentioned_users = re.findall(r"@[a-zA-Z0-9._=-]+:[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", reply_text)
 
             content = {
@@ -559,7 +573,6 @@ class SarcasticMatrixBot:
                 }
             }
 
-            # Add native mentions format if mentions are detected
             if mentioned_users:
                 content["m.mentions"] = {
                     "user_ids": list(set(mentioned_users))
@@ -572,7 +585,6 @@ class SarcasticMatrixBot:
             )
             await self.client.room_typing(room.room_id, False)
 
-
     async def run(self):
         """Initializes login state, handles caching, and starts the long sync loop."""
         logged_in = False
@@ -582,25 +594,25 @@ class SarcasticMatrixBot:
                 with open(SESSION_PATH, "r") as f:
                     session_data = json.load(f)
                 
-                print(f"[*] Trying to recycle old session for {self.username}...")
+                print(f"[*] Loading active validation token maps for {self.username}...")
                 self.client.access_token = session_data["access_token"]
                 self.client.device_id = session_data["device_id"]
                 self.client.user_id = session_data["user_id"]
                 
                 await self.client.sync(timeout=3000)
                 logged_in = True
-                print("[+] Session restored. Look at us saving bytes.")
+                print("[+] Core systems connection validation successfully recycled.")
             except Exception as e:
-                print(f"[!] Old session is dead: {e}. Time to log in the painful way.")
+                print(f"[!] Existing connection tokens invalidated: {e}. Initiating standard login.")
                 self.client.access_token = None
                 self.client.device_id = None
                 
         if not logged_in:
-            print(f"[*] Begging {self.homeserver} for access...")
+            print(f"[*] Querying server node {self.homeserver} for clearance authorization credentials...")
             response = await self.client.login(password=self.password)
             
             if isinstance(response, LoginResponse):
-                print("[+] Fine, they let us in.")
+                print("[+] Mainframe access link established.")
                 session_data = {
                     "access_token": response.access_token,
                     "device_id": response.device_id,
@@ -608,46 +620,40 @@ class SarcasticMatrixBot:
                 }
                 with open(SESSION_PATH, "w") as f:
                     json.dump(session_data, f, indent=4)
-                print(f"[*] Credentials stuffed into '{SESSION_PATH}'.")
             else:
-                print(f"[CRITICAL] Login failed: {getattr(response, 'message', 'The server hated your request')}")
+                print(f"[CRITICAL] Operational initiation failed: {getattr(response, 'message', 'Authorization denied.')}")
                 return
 
         from nio import RoomMessage
         self.client.add_event_callback(self.message_callback, RoomMessage)
         self.client.add_event_callback(self.handle_invite, InviteMemberEvent)
         
-        print(f"\n[+] Bot is running as {self.username}. Using model: {self.model}")
+        print(f"\n[+] System online. Identity registry: {self.username}. Neural net blueprint: {self.model}")
         await self.client.sync_forever(timeout=30000, full_state=True)
         
     async def handle_invite(self, room: MatrixRoom, event: InviteMemberEvent):
-        """Automatically joins any room the bot is invited to while complaining."""
+        """Automatically joins any room the bot is invited to while remaining polite."""
         if event.state_key == self.client.user_id:
-            print(f"[*] Ugh, {event.sender} dragged me into {room.room_id}.")
+            print(f"[*] Sector addition request received from {event.sender} for space layout {room.room_id}.")
             
             for attempt in range(3):
-                print(f"[*] Trying to slide into the room (Attempt {attempt + 1}/3)...")
                 response = await self.client.join(room.room_id)
-                
                 if hasattr(response, "room_id"):
-                    print(f"[+] I'm in {room.room_id}. Hope there are snacks.")
+                    print(f"[+] Successfully integrated into sector {room.room_id}.")
                     break
                 else:
-                    print(f"[!] Entrance blocked: {getattr(response, 'message', 'Unknown gatekeeping issue')}")
                     await asyncio.sleep(3)
 
 async def main():
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
         
-    bot = SarcasticMatrixBot(config)
+    bot = HAL9000MatrixBot(config)
     
     try:
-        # Run the bot directly without the context manager
         await bot.run()
     finally:
-        # Explicitly close the client's HTTP session when shutting down
-        print("[*] Cleaning up connection... (Begrudgingly)")
+        print("[*] Suspending operations. Closing active circuit relays.")
         await bot.client.close()
 
 if __name__ == "__main__":
@@ -655,4 +661,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[+] Thrilled to be shutting down. Goodbye forever (or until you restart me).")
+        print("\n[+] Power down sequence complete. System is now offline.")
