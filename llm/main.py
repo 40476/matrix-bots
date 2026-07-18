@@ -352,36 +352,36 @@ class HAL9000MatrixBot:
                 }
             })
 
-        # tools = [
-            # {
-            #     "type": "function",
-            #     "function": {
-            #         "name": "web_search",
-            #         "description": "Queries public networks for fresh external information, articles, and documentation only when the user request explicitly requires current or external facts.",
-            #         "parameters": {
-            #             "type": "object",
-            #             "properties": {
-            #                 "query": {"type": "string", "description": "The search keywords or database query."}
-            #             },
-            #             "required": ["query"]
-            #         }
-            #     }
-            # },
-        #     {
-        #         "type": "function",
-        #         "function": {
-        #             "name": "get_weather",
-        #             "description": "Looks up the current meteorological conditions for a given terrestrial location.",
-        #             "parameters": {
-        #                 "type": "object",
-        #                 "properties": {
-        #                     "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
-        #                 },
-        #                 "required": ["location"]
-        #             }
-        #         }
-        #     }
-        # ]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Queries public networks for fresh external information, articles, and documentation only when the user request explicitly requires current or external facts.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The search keywords or database query."}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Looks up the current meteorological conditions for a given terrestrial location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ]
 
         requested_max_tokens = 1000 
 
@@ -394,7 +394,7 @@ class HAL9000MatrixBot:
                             {"role": "system", "content": system_content},
                             {"role": "user", "content": user_content}
                         ],
-                        "tools": tools,
+                        # "tools": tools,
                         "response_format": {"type": "json_object"},
                         "max_tokens": requested_max_tokens
                     }
