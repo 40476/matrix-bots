@@ -352,7 +352,7 @@ class HAL9000MatrixBot:
                 }
             })
 
-        tools = [
+        # tools = [
             # {
             #     "type": "function",
             #     "function": {
@@ -367,21 +367,21 @@ class HAL9000MatrixBot:
             #         }
             #     }
             # },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Looks up the current meteorological conditions for a given terrestrial location.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
-                        },
-                        "required": ["location"]
-                    }
-                }
-            }
-        ]
+        #     {
+        #         "type": "function",
+        #         "function": {
+        #             "name": "get_weather",
+        #             "description": "Looks up the current meteorological conditions for a given terrestrial location.",
+        #             "parameters": {
+        #                 "type": "object",
+        #                 "properties": {
+        #                     "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
+        #                 },
+        #                 "required": ["location"]
+        #             }
+        #         }
+        #     }
+        # ]
 
         requested_max_tokens = 1000 
 
