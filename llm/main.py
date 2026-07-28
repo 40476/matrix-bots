@@ -551,7 +551,7 @@ class HAL9000MatrixBot:
                 }
         return None
 
-    async def message_callback(self, room: MatrixRoom, event) -> None:
+async def message_callback(self, room: MatrixRoom, event) -> None:
         """Processes incoming room messages with rate limiting rules, web searches and custom tags."""
         if event.sender == self.username or event.sender in self.blacklist:
             return
@@ -571,21 +571,8 @@ class HAL9000MatrixBot:
 
         body_text = event.body if is_text_event else ""
         
-        # --- NEW: Get display name dynamically if not cached ---
-        # If you cache it in self.bot_display_name, use that directly.
-        # Alternatively, fallback to self.display_name_hint
-        current_display_name = getattr(self, "bot_display_name", getattr(self, "display_name_hint", ""))
-        
-        # Build regex patterns for both the display name and the hint
-        patterns = []
-        if current_display_name:
-            patterns.append(rf"\b{re.escape(current_display_name)}\b")
-        if hasattr(self, "dis@HAL-9000:usr40k.devplay_name_hint") and self.display_name_hint:
-            patterns.append(rf"\b{re.escape(self.display_name_hint)}\b")
-            
-        combined_pattern = "|".join(patterns) if patterns else r"$^" # matches nothing if empty
-        
-        contains_name_word = bool(re.search(combined_pattern, body_text, re.IGNORECASE)) if body_text else False
+        pattern = rf"\b{re.escape(self.display_name_hint)}\b"
+        contains_name_word = bool(re.search(pattern, body_text, re.IGNORECASE)) if body_text else False
         contains_id = self.username in body_text if body_text else False
 
         content_dict = event.source.get("content", {})
@@ -672,7 +659,7 @@ class HAL9000MatrixBot:
 
             clean_body = body_text
             if clean_body:
-                clean_body = re.sub(patterns, "", clean_body, flags=re.IGNORECASE).replace(self.username, "").strip()
+                clean_body = re.sub(pattern, "", clean_body, flags=re.IGNORECASE).replace(self.username, "").strip()
                 if clean_body.startswith(":"):
                     clean_body = clean_body[1:].strip()
             else:
