@@ -551,7 +551,7 @@ class HAL9000MatrixBot:
                 }
         return None
 
-async def message_callback(self, room: MatrixRoom, event) -> None:
+    async def message_callback(self, room: MatrixRoom, event) -> None:
         """Processes incoming room messages with rate limiting rules, web searches and custom tags."""
         if event.sender == self.username or event.sender in self.blacklist:
             return
