@@ -580,7 +580,7 @@ class HAL9000MatrixBot:
         patterns = []
         if current_display_name:
             patterns.append(rf"\b{re.escape(current_display_name)}\b")
-        if hasattr(self, "display_name_hint") and self.display_name_hint:
+        if hasattr(self, "dis@HAL-9000:usr40k.devplay_name_hint") and self.display_name_hint:
             patterns.append(rf"\b{re.escape(self.display_name_hint)}\b")
             
         combined_pattern = "|".join(patterns) if patterns else r"$^" # matches nothing if empty
@@ -672,7 +672,7 @@ class HAL9000MatrixBot:
 
             clean_body = body_text
             if clean_body:
-                clean_body = re.sub(pattern, "", clean_body, flags=re.IGNORECASE).replace(self.username, "").strip()
+                clean_body = re.sub(patterns, "", clean_body, flags=re.IGNORECASE).replace(self.username, "").strip()
                 if clean_body.startswith(":"):
                     clean_body = clean_body[1:].strip()
             else:
