@@ -23,11 +23,6 @@ CONFIG_PATH = "config.json"
 SESSION_PATH = "session.json"
 MEMORY_PATH = "memory.json"
 DEFAULT_BOT = "google/gemini-2.5-flash"
-DEFAULT_SEARCH_INSTANCES = [
-    "https://searx.tiekoetter.com",
-    "https://searx.kavin.rocks",
-    "https://searx.be"
-]
 
 def setup_config():
     """Checks for configuration, prompting the user interactively if missing."""
@@ -84,9 +79,9 @@ class HAL9000MatrixBot:
         self.username = config["username"]
         self.password = config["password"]
         self.openrouter_keys = config["openrouter_keys"]
+        self.TAVILY_KEY = config["tavily_key"]
         self.model = config.get("model", DEFAULT_BOT)
         self.blacklist = config.get("blacklist", [])
-        self.search_instances = config.get("search_instances", DEFAULT_SEARCH_INSTANCES)
         self.key_index = 0  
         self.processed_events = set()
         self.display_name_hint = self.username.split(":")[0].replace("@", "")
@@ -366,21 +361,21 @@ class HAL9000MatrixBot:
                         "required": ["query"]
                     }
                 }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Looks up the current meteorological conditions for a given terrestrial location.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
-                        },
-                        "required": ["location"]
-                    }
-                }
-            }
+            }#,
+            # {
+            #     "type": "function",
+            #     "function": {
+            #         "name": "get_weather",
+            #         "description": "Looks up the current meteorological conditions for a given terrestrial location.",
+            #         "parameters": {
+            #             "type": "object",
+            #             "properties": {
+            #                 "location": {"type": "string", "description": "The city, country, or geographical coordinate."}
+            #             },
+            #             "required": ["location"]
+            #         }
+            #     }
+            # }
         ]
 
         requested_max_tokens = 1000 
@@ -428,7 +423,11 @@ class HAL9000MatrixBot:
                                 print(f"[*] HAL 9000 invoking internal module: {func_name} with arguments {func_args}")
                                 
                                 if func_name == "web_search":
-                                    result_str = await self.scrape_searxng(func_args.get("query"))
+                                    from tavily import TavilyClient
+                                    
+                                    tavily_client = TavilyClient(api_key=self.TAVILY_KEY)
+                                    response = tavily_client.search(func_args.get("query"))
+                                    result_str = response
                                 elif func_name == "get_weather":
                                     result_str = await self.get_weather(func_args.get("location"))
                                 else:
