@@ -86,7 +86,9 @@ class HAL9000MatrixBot:
         self.processed_events = set()
         self.display_name_hint = self.username.split(":")[0].replace("@", "")
         self.client = AsyncClient(self.homeserver, self.username)
-        
+        self.bot_display_name = await self.client.get_display_name(self.username).display_name if hasattr(resp, "display_name") else self.username
+
+                        
         self.message_history = {}
         self.spam_warnings = {}
 
@@ -555,8 +557,21 @@ class HAL9000MatrixBot:
 
         body_text = event.body if is_text_event else ""
         
-        pattern = rf"\b{re.escape(self.display_name_hint)}\b"
-        contains_name_word = bool(re.search(pattern, body_text, re.IGNORECASE)) if body_text else False
+        # --- NEW: Get display name dynamically if not cached ---
+        # If you cache it in self.bot_display_name, use that directly.
+        # Alternatively, fallback to self.display_name_hint
+        current_display_name = getattr(self, "bot_display_name", getattr(self, "display_name_hint", ""))
+        
+        # Build regex patterns for both the display name and the hint
+        patterns = []
+        if current_display_name:
+            patterns.append(rf"\b{re.escape(current_display_name)}\b")
+        if hasattr(self, "display_name_hint") and self.display_name_hint:
+            patterns.append(rf"\b{re.escape(self.display_name_hint)}\b")
+            
+        combined_pattern = "|".join(patterns) if patterns else r"$^" # matches nothing if empty
+        
+        contains_name_word = bool(re.search(combined_pattern, body_text, re.IGNORECASE)) if body_text else False
         contains_id = self.username in body_text if body_text else False
 
         content_dict = event.source.get("content", {})
