@@ -72,7 +72,21 @@ def setup_config():
     print("="*60)
     return True
 
-
+async def initialize_bot_profile(self):
+    """Fetches and sets the bot's display name asynchronously."""
+    try:
+        resp = await self.client.get_display_name(self.username)
+        # Check if response object has display_name attribute or handle dictionary-like response depending on matrix-nio version
+        if hasattr(resp, "display_name") and resp.display_name:
+            self.bot_display_name = resp.display_name
+        elif isinstance(resp, dict) and resp.get("displayname"):
+            self.bot_display_name = resp.get("displayname")
+        else:
+            self.bot_display_name = self.username
+    except Exception as e:
+        print(f"[!] Could not fetch display name: {e}")
+        self.bot_display_name = getattr(self, "display_name_hint", self.username)
+        
 class HAL9000MatrixBot:
     def __init__(self, config):
         self.homeserver = config["homeserver"]
@@ -86,7 +100,7 @@ class HAL9000MatrixBot:
         self.processed_events = set()
         self.display_name_hint = self.username.split(":")[0].replace("@", "")
         self.client = AsyncClient(self.homeserver, self.username)
-        self.bot_display_name = await self.client.get_display_name(self.username).display_name if hasattr(resp, "display_name") else self.username
+        initialize_bot_profile(self)
 
                         
         self.message_history = {}
