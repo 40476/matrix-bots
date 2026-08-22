@@ -178,6 +178,16 @@ class MatrixLLMBot:
 
         self.display_name_hint = self.persona.get("shortcode") or self.username.split(":")[0].replace("@", "")
         self.bot_display_name = self.display_name_hint
+        # Aliases the bot will respond to by name (populated fully once we fetch
+        # the real Matrix profile display name in run()); seeded here so the
+        # bot still works even if that fetch fails.
+        local_part = self.username.split(":")[0].replace("@", "")
+        self.trigger_aliases = {a for a in (
+            self.display_name_hint,
+            self.persona.get("name"),
+            local_part,
+        ) if a}
+        self.trigger_pattern = self._build_trigger_pattern()
 
         self.key_index = 0
         self.processed_events = set()
@@ -286,6 +296,37 @@ class MatrixLLMBot:
         if len(self.openrouter_keys) > 1:
             self.key_index = (self.key_index + 1) % len(self.openrouter_keys)
             print(f"[*] Rotating to API key index {self.key_index}.")
+
+    # -------------------------------------------------------------- naming
+
+    def _build_trigger_pattern(self):
+        """One regex matching ANY known alias for the bot (shortcode, persona
+        name, actual Matrix display name, username local part), so a message
+        triggers a response no matter which name the sender used."""
+        escaped = sorted({re.escape(a) for a in self.trigger_aliases if a}, key=len, reverse=True)
+        if not escaped:
+            return None
+        return re.compile(r"\b(?:" + "|".join(escaped) + r")\b", re.IGNORECASE)
+
+    async def refresh_display_name(self):
+        """Fetches the bot's actual Matrix profile display name and adds it
+        to the set of names it will respond to. Without this, a bot whose
+        Matrix display name differs from its config shortcode / username
+        local part would silently never trigger on that name."""
+        try:
+            resp = await self.client.get_display_name(self.username)
+            fetched = None
+            if hasattr(resp, "displayname") and resp.displayname:
+                fetched = resp.displayname
+            elif isinstance(resp, dict) and resp.get("displayname"):
+                fetched = resp.get("displayname")
+            if fetched:
+                self.bot_display_name = fetched
+                self.trigger_aliases.add(fetched)
+                self.trigger_pattern = self._build_trigger_pattern()
+                print(f"[*] Trigger aliases: {sorted(self.trigger_aliases)}")
+        except Exception as e:
+            print(f"[!] Could not fetch display name (will still respond to configured aliases): {e}")
 
     # -------------------------------------------------------------- tools
 
@@ -607,7 +648,8 @@ class MatrixLLMBot:
             f"{self.persona.get('signoff_style', '')}\n"
             f"{never_do_txt}\n"
             f"{backstory_block}\n"
-            f"Your Matrix user ID is '{self.username}', name shortcode '{self.display_name_hint}'.\n\n"
+            f"Your Matrix user ID is '{self.username}', and people may address you as: "
+            f"{', '.join(sorted(self.trigger_aliases))}.\n\n"
             f"MEMORY BANK (persistent facts you've learned, not tied to one person):\n{json.dumps(global_facts, indent=2)}\n\n"
             f"USER PROFILE (Subject: {sender_id}):\n{json.dumps(sender_profile, indent=2)}\n"
             f"{buffer_notice}\n"
@@ -947,8 +989,7 @@ class MatrixLLMBot:
                 self.record_bot_style_example(event.sender, body_text)
             await self.maybe_summarize_room(room.room_id)
 
-        pattern = rf"\b{re.escape(self.display_name_hint)}\b"
-        contains_name_word = bool(re.search(pattern, body_text, re.IGNORECASE)) if body_text else False
+        contains_name_word = bool(self.trigger_pattern.search(body_text)) if (body_text and self.trigger_pattern) else False
         contains_id = self.username in body_text if body_text else False
 
         content_dict = event.source.get("content", {})
@@ -1005,7 +1046,9 @@ class MatrixLLMBot:
 
         clean_body = body_text
         if clean_body:
-            clean_body = re.sub(pattern, "", clean_body, flags=re.IGNORECASE).replace(self.username, "").strip()
+            if self.trigger_pattern:
+                clean_body = self.trigger_pattern.sub("", clean_body).strip()
+            clean_body = clean_body.replace(self.username, "").strip()
             if clean_body.startswith(":"):
                 clean_body = clean_body[1:].strip()
         else:
@@ -1094,6 +1137,8 @@ class MatrixLLMBot:
             else:
                 print(f"[CRITICAL] Login failed: {getattr(response, 'message', 'unknown error')}")
                 return
+
+        await self.refresh_display_name()
 
         from nio import RoomMessage
         self.client.add_event_callback(self.message_callback, RoomMessage)
