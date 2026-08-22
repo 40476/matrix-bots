@@ -1,0 +1,7 @@
+matrix-nio[e2e]
+httpx
+beautifulsoup4
+Pillow
+tavily-python
+edge-tts
+ddgs
