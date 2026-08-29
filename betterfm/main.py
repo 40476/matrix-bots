@@ -9,9 +9,12 @@ Features:
 - Extremely secure layout parsing engine (no eval, no path traversals, strict validation).
 - Interactive first-time CLI setup wizard with config file generation.
 - Automated room invite-joining mechanism with retry safety logic.
-- Robust, keyless 3-tier fallback cover art fetcher (iTunes, Deezer, and MusicBrainz CAA) when Last.fm is missing artwork.
+- Robust, keyless 5-tier fallback cover art fetcher (iTunes, Deezer, MusicBrainz CAA,
+  TheAudioDB, and Odesli/song.link thumbnails) when Last.fm is missing artwork.
 - Smart split-artist queries: tries individual artists separately if combined group query fails to yield artwork.
-- Automatic, keyless music link resolver (YouTube, Spotify, direct Apple Music track URLs).
+- Automatic music link resolver (YouTube, Spotify, Apple Music) that links directly to the
+  actual track via the free Odesli/song.link API, and gracefully falls back to a search link
+  on each platform when a direct match can't be found.
 - Double-lookup iTunes reliability: automatically extracts track ID from song URL and retries via Lookup API for accurate art.
 - Relative Last Active/Activity tracking notice ({activity}) built into rendering pipeline.
 - Proper alpha channel compositing for beautiful glassmorphism and frosted glass blends.
@@ -30,7 +33,7 @@ import asyncio
 import logging
 from io import BytesIO
 from typing import Dict, Any, Tuple, Optional, Union
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 # Third party dependencies
 from nio import AsyncClient, MatrixRoom, RoomMessageText, InviteMemberEvent
@@ -278,25 +281,85 @@ class LastFMClient:
                 logger.warning(f"MusicBrainz Cover Art Archive fallback failed: {e}")
         return None
 
+    async def _fetch_theaudiodb(self, artist: str, album_name: str, title: str) -> Optional[str]:
+        """Queries TheAudioDB's public API (Fallback Tier 4). Tries an album lookup
+        first (best quality artwork), then falls back to a track lookup if that
+        misses (covers singles / tracks without a proper album tag)."""
+        base = "https://www.theaudiodb.com/api/v1/json/2"
+
+        async with aiohttp.ClientSession() as session:
+            if album_name and album_name.lower() != "unknown album":
+                try:
+                    url = f"{base}/searchalbum.php?s={quote_plus(artist)}&a={quote_plus(album_name)}"
+                    async with session.get(url, timeout=4) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            albums = data.get("album") or []
+                            if albums:
+                                thumb = albums[0].get("strAlbumThumb")
+                                if thumb:
+                                    return thumb
+                except Exception as e:
+                    logger.warning(f"TheAudioDB album lookup failed: {e}")
+
+            try:
+                url = f"{base}/searchtrack.php?s={quote_plus(artist)}&t={quote_plus(title)}"
+                async with session.get(url, timeout=4) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        tracks = data.get("track") or []
+                        if tracks:
+                            thumb = tracks[0].get("strTrackThumb") or tracks[0].get("strAlbumThumb")
+                            if thumb:
+                                return thumb
+            except Exception as e:
+                logger.warning(f"TheAudioDB track lookup failed: {e}")
+        return None
+
+    async def _fetch_odesli(self, source_url: str) -> Optional[Dict[str, Any]]:
+        """Queries the free Odesli/song.link API (Fallback Tier 5 for art, and the
+        primary resolver for direct cross-platform song links). Given any single
+        known streaming URL (we feed it the resolved Apple Music track link), it
+        returns the matching track URL on Spotify, YouTube, etc, plus a thumbnail
+        that can be used as a last-resort artwork fallback."""
+        url = f"https://api.song.link/v1-alpha.1/links?url={quote_plus(source_url)}&userCountry=US"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=6) as resp:
+                    if resp.status == 200:
+                        return await resp.json(content_type=None)
+                    else:
+                        logger.warning(f"Odesli/song.link returned status {resp.status}")
+            except Exception as e:
+                logger.warning(f"Odesli/song.link resolution failed: {e}")
+        return None
+
     async def resolve_metadata(self, artist: str, title: str, album: str, album_art_url: Optional[str]) -> Tuple[Optional[str], Dict[str, str]]:
         """
-        An advanced fallback pipeline trying multiple public keyless
-        APIs to resolve cover art (including individual split artist retry
-        and a reliable direct iTunes lookup ID retry loop) and direct streaming links.
+        An advanced fallback pipeline trying multiple public APIs to resolve cover
+        art (including individual split artist retry and a reliable direct iTunes
+        lookup ID retry loop) and to resolve direct per-platform streaming links,
+        falling back to a plain search link on any platform it can't match.
         """
         clean_artist = re.sub(r"[^\w\s\-]", "", artist)
         clean_title = re.sub(r"[^\w\s\-]", "", title)
         clean_album = re.sub(r"[^\w\s\-]", "", album) if album else ""
         
-        # Build standard fallbacks (search fallback links)
+        # Build standard fallbacks (search fallback links). These are always valid
+        # and are what we ship if a direct match can't be found for that platform.
         search_query_encoded = quote_plus(f"{artist} - {title}")
         links = {
             "youtube": f"https://www.youtube.com/results?search_query={search_query_encoded}",
-            "spotify": f"https://open.spotify.com/search/{search_query_encoded}",
+            # NOTE: open.spotify.com/search/<query> takes the query as a URL *path*
+            # segment, not a query-string parameter, so spaces must be percent-encoded
+            # (%20) via quote(), NOT quote_plus() which produces literal '+' characters
+            # that Spotify doesn't decode as spaces - that was why these links 404'd.
+            "spotify": f"https://open.spotify.com/search/{quote(f'{artist} {title}')}",
             "apple": f"https://music.apple.com/us/search?term={search_query_encoded}"
         }
         
         resolved_art = album_art_url
+        direct_apple_url = None
         
         # Build search term for first-pass
         search_query = f"{clean_artist} {clean_title}"
@@ -317,6 +380,7 @@ class LastFMClient:
                             direct_apple = results[0].get("trackViewUrl")
                             if direct_apple:
                                 links["apple"] = direct_apple
+                                direct_apple_url = direct_apple
                                 
                                 # Extract track ID to run direct lookup retry for top-tier reliability
                                 track_id_match = re.search(r"[?&]i=(\d+)", direct_apple) or re.search(r"/id(\d+)", direct_apple)
@@ -358,6 +422,36 @@ class LastFMClient:
             except Exception as e:
                 logger.warning(f"Deezer query pass failed: {e}")
 
+        # 3. Resolve real per-platform song links (Spotify/YouTube/Apple) via Odesli,
+        # anchored off the direct Apple Music track URL we just found. Whatever it
+        # can't match, the pre-built search links from above are left standing.
+        if direct_apple_url:
+            odesli_data = await self._fetch_odesli(direct_apple_url)
+            if odesli_data:
+                platforms = odesli_data.get("linksByPlatform", {}) or {}
+
+                spotify_entry = platforms.get("spotify")
+                if spotify_entry and spotify_entry.get("url"):
+                    links["spotify"] = spotify_entry["url"]
+                    logger.info("Resolved direct Spotify track link via Odesli.")
+
+                yt_entry = platforms.get("youtube") or platforms.get("youtubeMusic")
+                if yt_entry and yt_entry.get("url"):
+                    links["youtube"] = yt_entry["url"]
+                    logger.info("Resolved direct YouTube link via Odesli.")
+
+                apple_entry = platforms.get("appleMusic") or platforms.get("itunes")
+                if apple_entry and apple_entry.get("url"):
+                    links["apple"] = apple_entry["url"]
+
+                # Use Odesli's thumbnail as an extra art fallback tier if we still
+                # don't have artwork at this point.
+                if not resolved_art:
+                    thumb = odesli_data.get("thumbnailUrl")
+                    if thumb:
+                        resolved_art = thumb
+                        logger.info("Using Odesli thumbnail as fallback artwork.")
+
         # If combined search fails to find artwork, split combined group artist strings and try separately
         if not resolved_art:
             artists_list = self.split_artists(artist)
@@ -384,9 +478,18 @@ class LastFMClient:
                         logger.info(f"Successfully resolved fallback artwork using split artist: {split_art}")
                         break
 
-        # Fallback to MusicBrainz main combined query as final effort
+                    resolved_art = await self._fetch_theaudiodb(split_art, clean_album, clean_title)
+                    if resolved_art:
+                        logger.info(f"Successfully resolved fallback artwork using split artist: {split_art}")
+                        break
+
+        # Fallback to MusicBrainz main combined query as further effort
         if not resolved_art:
             resolved_art = await self._fetch_musicbrainz(clean_artist, clean_album)
+
+        # Final effort: TheAudioDB combined query
+        if not resolved_art:
+            resolved_art = await self._fetch_theaudiodb(clean_artist, clean_album, clean_title)
 
         return resolved_art, links
 
