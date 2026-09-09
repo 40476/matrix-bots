@@ -104,6 +104,7 @@ def setup_config() -> bool:
         "cmd_stats": "!fmstats",
         "cmd_setuser": "!setuser",
         "cmd_setstyle": "!setstyle",
+        "cmd_setcolor": "!setcolor",
         "cmd_help": "!fmhelp",
         "cmd_bwk": "!bwk",
         "cmd_bwhoknows": "!bwhoknows",
@@ -145,6 +146,7 @@ CONFIG = {
     "CMD_STATS": FILE_CONFIG.get("cmd_stats", "!fmstats").strip().lower(),
     "CMD_SETUSER": FILE_CONFIG.get("cmd_setuser", "!setuser").strip().lower(),
     "CMD_SETSTYLE": FILE_CONFIG.get("cmd_setstyle", "!setstyle").strip().lower(),
+    "CMD_SETCOLOR": FILE_CONFIG.get("cmd_setcolor", "!setcolor").strip().lower(),
     "CMD_HELP": FILE_CONFIG.get("cmd_help", "!fmhelp").strip().lower(),
     "CMD_BWK": FILE_CONFIG.get("cmd_bwk", "!bwk").strip().lower(),
     "CMD_BWHOKNOWS": FILE_CONFIG.get("cmd_bwhoknows", "!bwhoknows").strip().lower(),
@@ -196,6 +198,20 @@ def set_user_style(matrix_id: str, style_name_or_spec: str):
     if matrix_id not in db["users"]:
         db["users"][matrix_id] = {}
     db["users"][matrix_id]["style"] = style_name_or_spec
+    save_db(db)
+
+def get_user_accent(matrix_id: str) -> Optional[str]:
+    db = load_db()
+    val = db.get("users", {}).get(matrix_id, {}).get("accent")
+    return val if isinstance(val, str) else None
+
+def set_user_accent(matrix_id: str, accent: str):
+    db = load_db()
+    if "users" not in db:
+        db["users"] = {}
+    if matrix_id not in db["users"]:
+        db["users"][matrix_id] = {}
+    db["users"][matrix_id]["accent"] = accent
     save_db(db)
 
 
@@ -752,7 +768,7 @@ STYLE_PRESETS = {
         "rect 20 20 210 210 #2a2a35\n"
         "image 20 20 210 210 {album_art}\n"
         "text 250 45 {artist} #ffffff 28 bold\n"
-        "text 250 90 {title} #1db954 22\n"
+        "text 250 90 {title} {accent} 22\n"
         "text 250 135 {album} #a0a0b0 18 italic\n"
         "text 250 190 Last.fm: {username} • {activity} #888899 14\n"
     ),
@@ -766,9 +782,9 @@ STYLE_PRESETS = {
         "image 160 160 180 180 {album_art}\n"
         # Curved labels and metadata on the outer space
         "text 35 375 {artist} #ffffff 24 bold\n"
-        "text 35 410 {title} #1db954 18 bold\n"
+        "text 35 410 {title} {accent} 18 bold\n"
         "text 35 440 {album} #8c8c99 14 italic\n"
-        "text 35 470 Status: {activity} #00ffff 12 bold\n"
+        "text 35 470 Status: {activity} {accent_dim} 12 bold\n"
     ),
     "glass_square": (
         "canvas 600 600 #0f0b18\n"
@@ -781,7 +797,7 @@ STYLE_PRESETS = {
         "rect 40 40 560 560 #ffffff08\n"
         "image 150 90 300 300 {album_art}\n"
         "text 80 415 {artist} #ffffff 28 bold\n"
-        "text 80 455 {title} #00f0ff 22 bold\n"
+        "text 80 455 {title} {accent} 22 bold\n"
         "text 80 495 {album} #ffffffcc 16 italic\n"
         "text 80 525 {activity} #ffffff80 13 bold\n"
     ),
@@ -796,39 +812,39 @@ STYLE_PRESETS = {
         "image 75 70 300 300 {album_art}\n"
         # Text details aligned vertically
         "text 75 410 {artist} #ffffff 28 bold\n"
-        "text 75 465 {title} #00f0ff 22 bold\n"
+        "text 75 465 {title} {accent} 22 bold\n"
         "text 75 515 {album} #e2e2e9 18 italic\n"
-        "text 75 565 {activity} #ffe5b4 14 bold\n"
+        "text 75 565 {activity} {accent_light} 14 bold\n"
         "text 75 605 LISTENER: {username} #ffffff80 13 bold\n"
     ),
     "retro_vertical": (
         "canvas 400 650 #020208\n"
-        "rect 10 10 390 640 #ff007f\n"
+        "rect 10 10 390 640 {accent}\n"
         "rect 15 15 385 635 #050510\n"
         # Sharp framed cassette/arcade art window
-        "rect 40 40 360 360 #00ffff\n"
+        "rect 40 40 360 360 {accent_light}\n"
         "image 45 45 310 310 {album_art}\n"
         # Retro layout details stacked
-        "text 45 425 {artist} #00ffff 26 bold\n"
-        "text 45 465 {title} #ff007f 20 bold\n"
-        "text 45 505 {album} #ffff00 16 italic\n"
-        "text 45 545 {activity} #00ffff 14 bold\n"
-        "text 45 590 RETRO_STREAM // {username} #00ffffa0 12\n"
+        "text 45 425 {artist} {accent_light} 26 bold\n"
+        "text 45 465 {title} {accent} 20 bold\n"
+        "text 45 505 {album} {accent_dim} 16 italic\n"
+        "text 45 545 {activity} {accent_light} 14 bold\n"
+        "text 45 590 RETRO_STREAM // {username} {accent_light}a0 12\n"
     ),
     "cyberpunk_vertical": (
         "canvas 450 700 #fcee0a\n"
         "rect 12 0 450 700 #000000\n"
         "rect 0 0 12 700 #fcee0a\n"
         # Hazard style frames
-        "rect 40 40 410 410 #00f0ff\n"
+        "rect 40 40 410 410 {accent_light}\n"
         "image 45 45 360 360 {album_art}\n"
         # High contrast futuristic neon readouts
-        "rect 40 440 410 490 #fcee0a\n"
+        "rect 40 440 410 490 {accent}\n"
         "text 50 452 {artist} #000000 24 bold\n"
         "text 40 515 {title} #ffffff 22 bold\n"
-        "text 40 565 {album} #00f0ff 18 italic\n"
-        "text 40 595 STATE: {activity} #00f0ff 13 bold\n"
-        "text 40 635 [USER_CONNECT: {username}] #fcee0a 12 bold\n"
+        "text 40 565 {album} {accent_light} 18 italic\n"
+        "text 40 595 STATE: {activity} {accent_light} 13 bold\n"
+        "text 40 635 [USER_CONNECT: {username}] {accent} 12 bold\n"
     ),
     "cozy_vertical": (
         "canvas 400 600 #faf0e6\n"
@@ -904,7 +920,7 @@ STYLE_PRESETS = {
         "text 50 370 {artist} #111115 24 bold\n"
         "text 50 405 {title} #5c5c68 18\n"
         "text 50 435 {album} #8e8e9c 14 italic\n"
-        "text 50 460 Listener: {username} • {activity} #9a80b0 12 bold\n"
+        "text 50 460 Listener: {username} • {activity} {accent_dim} 12 bold\n"
     ),
     "manga_panel": (
         "canvas 820 260 #ffffff\n"
@@ -947,14 +963,14 @@ def _build_animated_style_presets() -> Dict[str, str]:
         "canvas 560 620 #0e0e12\n"
         "delay 60\n"
         "text 150 475 {artist} #ffffff 28 bold\n"
-        "text 150 520 {title} #39ff88 22 bold\n"
+        "text 150 520 {title} {accent} 22 bold\n"
         "text 150 562 {album} #9aa0aa 16 italic\n"
         "text 280 600 {activity} #7d8590 13\n"
     )
     # 16 frames of glow breathing behind a fixed, centred art block (box 150-410, centre x=280).
     glow_alphas = [40, 90, 150, 210, 255, 210, 150, 90] * 2
     pulse_frames = [
-        "rect 124 124 436 436 #39ff88%02x\n" % a
+        "rect 124 124 436 436 {accent}%02x\n" % a
         + "rect 150 150 410 410 #191922\n"
         + "image 150 150 260 260 {album_art}\n"
         for a in glow_alphas
@@ -969,7 +985,7 @@ def _build_animated_style_presets() -> Dict[str, str]:
         "ellipse 100 100 300 300 #1e1e22\n"
         "ellipse 165 165 235 235 #000000\n"
         "text 40 380 {artist} #ffffff 22 bold\n"
-        "text 40 412 {title} #39d0ff 17 bold\n"
+        "text 40 412 {title} {accent} 17 bold\n"
         "text 40 440 {activity} #8a8f98 12\n"
     )
     # 24 frames at 50ms (~20fps). mask=circle keeps the rotating art inside the label ring
@@ -990,7 +1006,7 @@ def _build_animated_style_presets() -> Dict[str, str]:
         "rect 20 20 200 200 #1a1a22\n"
         "image 20 20 200 200 {album_art}\n"
         "text 240 40 {artist} #ffffff 24 bold\n"
-        "text 240 78 {title} #ff5fa2 19 bold\n"
+        "text 240 78 {title} {accent} 19 bold\n"
         "text 240 112 {album} #9aa0aa 14 italic\n"
         "text 240 220 {activity} #7d8590 12\n"
     )
@@ -1014,7 +1030,7 @@ def _build_animated_style_presets() -> Dict[str, str]:
             height = int(15 + 48 * abs(math.sin((f / n_frames) * 2 * math.pi + i * 0.8)))
             y0 = 200 - height
             # Fixed: passed x + bar_width for x1, and 200 for y1
-            bar_lines += f"rect {x} {y0} {x + bar_width} 200 #ff5fa2\n"
+            bar_lines += f"rect {x} {y0} {x + bar_width} 200 {{accent}}\n"
         eq_frames.append(bar_lines)
 
     presets["equalizer_gif"] = eq_header + "".join(f"---FRAME---\n{f}" for f in eq_frames)
@@ -1055,7 +1071,7 @@ def _build_animated_style_presets() -> Dict[str, str]:
         "rect 0 0 560 320 #00000060\n"
         "image 34 34 212 212 {album_art}\n"
         "text 264 40 {artist} #ffffff 24 bold\n"
-        "text 264 78 {title} #ff8a3d 19 bold\n"
+        "text 264 78 {title} {accent} 19 bold\n"
         "loop 40\n"
         "  rect 0 {i*8} 560 {i*8+1} #0000001e\n"
         "endloop\n"
@@ -1138,7 +1154,67 @@ class SecureRenderer:
 
 # Known metadata placeholder keys - these are left untouched by the math expression
     # substitution below (they get replaced later by the text/image handlers).
-    KNOWN_TOKENS = frozenset(["album_art", "artist", "title", "album", "username", "activity"])
+    KNOWN_TOKENS = frozenset(["album_art", "artist", "title", "album", "username", "activity",
+                              "accent", "accent_light", "accent_dim"])
+
+    # Fallback tint used when a user hasn't set an accent colour yet - a neutral white so
+    # every accent slot reads as a clean grey/white until the user picks their colour.
+    DEFAULT_ACCENT = "#ffffff"
+
+    @classmethod
+    def normalize_hex(cls, color: Optional[str]) -> Optional[str]:
+        """Returns a canonical '#rrggbb' string if `color` is a valid 3- or 6-digit hex, else None."""
+        if not isinstance(color, str):
+            return None
+        m = re.fullmatch(r"#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})", color.strip())
+        if not m:
+            return None
+        digits = m.group(1).lower()
+        if len(digits) == 3:
+            digits = "".join(ch * 2 for ch in digits)
+        return "#" + digits
+
+    @classmethod
+    def _hex_to_rgb(cls, hex_str: str) -> Tuple[int, int, int]:
+        h = hex_str.lstrip("#")
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    @classmethod
+    def _rgb_to_hex(cls, rgb: Tuple[int, int, int]) -> str:
+        return "#%02x%02x%02x" % (max(0, min(255, int(rgb[0]))),
+                                  max(0, min(255, int(rgb[1]))),
+                                  max(0, min(255, int(rgb[2]))))
+
+    @classmethod
+    def _mix_rgb(cls, a: Tuple[int, int, int], b: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
+        return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))  # type: ignore[return-value]
+
+    @classmethod
+    def accent_palette(cls, accent_color: Optional[str]) -> Dict[str, str]:
+        """
+        Given a user's accent colour, returns the tinted family used across every style:
+        `base` = the accent itself, `light` = a paler/whiter tint, `dim` = a darker tint.
+        Backgrounds, blurs and rainbow effects are deliberately NOT derived from this - only
+        the accent-coloured text & UI elements in each preset reference these tokens.
+        """
+        base = cls.normalize_hex(accent_color) or cls.DEFAULT_ACCENT
+        rgb = cls._hex_to_rgb(base)
+        return {
+            "base": base,
+            "light": cls._rgb_to_hex(cls._mix_rgb(rgb, (255, 255, 255), 0.45)),
+            "dim": cls._rgb_to_hex(cls._mix_rgb(rgb, (0, 0, 0), 0.45)),
+        }
+
+    @classmethod
+    def _apply_accent(cls, lines: List[str], accent_colors: Optional[Dict[str, str]]) -> List[str]:
+        """Replaces the `{accent}`/`{accent_light}`/`{accent_dim}` tokens with concrete hex values."""
+        if not accent_colors:
+            return lines
+        b = accent_colors["base"]
+        l = accent_colors["light"]
+        d = accent_colors["dim"]
+        return [line.replace("{accent_light}", l).replace("{accent_dim}", d).replace("{accent}", b)
+                for line in lines]
 
     @classmethod
     def _expand_control(cls, lines: List[str], env: Dict[str, Any]) -> List[str]:
@@ -1374,10 +1450,13 @@ class SecureRenderer:
         replacements: Dict[str, str],
         album_art_img: Image.Image,
         frame_index: int = 0,
+        accent_colors: Optional[Dict[str, str]] = None,
     ) -> Image.Image:
         """Draws one full frame's worth of directives onto a fresh RGBA canvas and returns it."""
         # Expand loop/if script sugar, exposing {f} (frame index) so scripts can animate.
         lines = cls._expand_control(lines, {"i": 0, "f": frame_index})
+        # Resolve the user's accent colour family into concrete hex values everywhere.
+        lines = cls._apply_accent(lines, accent_colors)
         img = Image.new("RGBA", canvas_size, bg_color)
         draw = ImageDraw.Draw(img)
 
@@ -1520,11 +1599,14 @@ class SecureRenderer:
         return img
 
     @classmethod
-    async def render_card(cls, track_info: Dict[str, Any], style_spec: str) -> Tuple[BytesIO, str, str]:
+    async def render_card(cls, track_info: Dict[str, Any], style_spec: str,
+                          accent_color: Optional[str] = None) -> Tuple[BytesIO, str, str]:
         """
         Renders a now-playing card from a style spec.
         Returns (image_bytes, mimetype, file_extension) - a plain PNG for static styles,
         or an animated, infinitely-looping GIF for any style containing '---FRAME---' markers.
+        `accent_color` (optional '#rrggbb') tints the accent slots in the preset; when omitted,
+        a neutral white default is used so styles stay grey/white/black.
         """
         album_art_img = None
         if track_info.get("album_art"):
@@ -1550,11 +1632,14 @@ class SecureRenderer:
             "{activity}": cls.sanitize_metadata(track_info.get("activity", "Inactive")),
         }
 
+        # Build the user's accent-tinted colour family (neutral white when unset).
+        accent_colors = cls.accent_palette(accent_color) if accent_color else cls.accent_palette(None)
+
         raw_lines = style_spec.split("\n")
 
         if not cls.is_animated(style_spec):
             canvas_width, canvas_height, bg_color = cls._extract_canvas_size(raw_lines)
-            frame_img = cls._draw_frame(raw_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img)
+            frame_img = cls._draw_frame(raw_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img, accent_colors=accent_colors)
             output = BytesIO()
             frame_img.save(output, format="PNG")
             output.seek(0)
@@ -1578,11 +1663,11 @@ class SecureRenderer:
         if frame_blocks:
             for f_idx, frame_lines in enumerate(frame_blocks):
                 combined = header_lines + frame_lines
-                frame_img = cls._draw_frame(combined, (canvas_width, canvas_height), bg_color, replacements, album_art_img, frame_index=f_idx)
+                frame_img = cls._draw_frame(combined, (canvas_width, canvas_height), bg_color, replacements, album_art_img, frame_index=f_idx, accent_colors=accent_colors)
                 rendered_frames.append(frame_img.convert("RGB"))
         else:
             # Defensive fallback: a marker with nothing after it just renders the header once.
-            frame_img = cls._draw_frame(header_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img, frame_index=0)
+            frame_img = cls._draw_frame(header_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img, frame_index=0, accent_colors=accent_colors)
             rendered_frames.append(frame_img.convert("RGB"))
 
         output = BytesIO()
@@ -1663,6 +1748,8 @@ class BetterFMBot:
             await self.handle_set_user(room, event, parts)
         elif cmd == CONFIG["CMD_SETSTYLE"]:
             await self.handle_set_style(room, event, body)
+        elif cmd == CONFIG["CMD_SETCOLOR"]:
+            await self.handle_set_color(room, event, parts)
         elif cmd == CONFIG["CMD_HELP"]:
             await self.handle_help(room)
         elif cmd == CONFIG["CMD_BWK"] or cmd == CONFIG["CMD_BWHOKNOWS"]:
@@ -1707,6 +1794,7 @@ class BetterFMBot:
             f"- `{CONFIG['CMD_STATS']} [user] [daily/monthly/overall]` - Fetches playstats and top tracks.\n"
             f"- `{CONFIG['CMD_SETUSER']} <lastfm_username>` - Links your Matrix ID to your Last.fm account.\n"
             f"- `{CONFIG['CMD_SETSTYLE']} <preset>` - Switches your design theme.\n"
+            f"- `{CONFIG['CMD_SETCOLOR']} <#rrggbb>` - Sets your main accent colour; every style's text & UI tints to it (neutral grey/white by default). Say `{CONFIG['CMD_SETCOLOR']}` alone to reset.\n"
             f"- `{CONFIG['CMD_SETSTYLE']} custom <directives>` - Saves a custom canvas design (add `---FRAME---` blocks for an animated GIF; script with `loop N ... endloop`, `if`/`endif`, and `{{i}}`/`{{f}}` `{{...}}` math for complex effects).\n"
             f"- `{CONFIG['CMD_BWK']} [artist]` (alias `{CONFIG['CMD_BWHOKNOWS']}`) - Who Knows leaderboard: ranks everyone registered with this bot by scrobbles of that artist (all-time). Leave the artist blank to use your own #1 artist.\n"
             f"- `{CONFIG['CMD_WIKI']} [artist] - [title]` - Looks up a short wiki entry for a track (falls back to the artist's bio). Leave blank to use your current/last track.\n"
@@ -1776,6 +1864,8 @@ class BetterFMBot:
 
             style_setting = get_user_style(sender)
             style_spec = STYLE_PRESETS.get(style_setting)
+            # Per-user accent colour (None -> neutral white default) tints the card.
+            user_accent = get_user_accent(sender)
             
             # Extract canvas configuration dimensions to configure custom sizing cleanly
             card_width, card_height = 800, 250
@@ -1810,7 +1900,7 @@ class BetterFMBot:
                             except ValueError:
                                 pass
 
-            image_stream, mimetype, ext = await SecureRenderer.render_card(track_info, style_spec)
+            image_stream, mimetype, ext = await SecureRenderer.render_card(track_info, style_spec, user_accent)
             mxc_uri = await self.upload_image_to_matrix(image_stream, f"{target_lastfm}_fm.{ext}", mimetype)
             
             if mxc_uri:
@@ -1964,6 +2054,52 @@ class BetterFMBot:
             {
                 "msgtype": "m.text",
                 "body": f"✅ Bound your Matrix handle to Last.fm username: {lastfm_username}"
+            }
+        )
+
+    async def handle_set_color(self, room: MatrixRoom, event: RoomMessageText, parts: list):
+        """
+        !setcolor [<#rrggbb> | <rrggbb>]
+
+        Sets the user's main accent colour, which tints the accent-coloured text & UI in
+        every style preset. Called with no argument, it resets back to the neutral
+        grey/white default. Backgrounds, blurred layers and rainbow effects are left alone.
+        """
+        sender = event.sender
+
+        # No argument -> reset to the neutral default.
+        if len(parts) < 2:
+            set_user_accent(sender, "")
+            await self.client.room_send(
+                room.room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": f"🎨 Accent colour reset to the neutral default. Use {CONFIG['CMD_SETCOLOR']} <#rrggbb> to set a new one."
+                }
+            )
+            return
+
+        raw = parts[1].strip()
+        canon = SecureRenderer.normalize_hex(raw)
+        if not canon:
+            await self.client.room_send(
+                room.room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": f"Invalid colour '{raw}'. Expected a hex value like `#1db954` or `1db954`."
+                }
+            )
+            return
+
+        set_user_accent(sender, canon)
+        await self.client.room_send(
+            room.room_id,
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": f"🎨 Accent colour set to `{canon}`. It now tints the text & UI of your style. Run {CONFIG['CMD_FM']} to see it."
             }
         )
 
