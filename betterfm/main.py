@@ -104,7 +104,7 @@ def setup_config() -> bool:
         "cmd_stats": "!fmstats",
         "cmd_setuser": "!setuser",
         "cmd_setstyle": "!setstyle",
-        "cmd_setcolor": "!setcolor",
+        "cmd_setcolor": "!setaccent",
         "cmd_help": "!fmhelp",
         "cmd_bwk": "!bwk",
         "cmd_bwhoknows": "!bwhoknows",
@@ -146,7 +146,7 @@ CONFIG = {
     "CMD_STATS": FILE_CONFIG.get("cmd_stats", "!fmstats").strip().lower(),
     "CMD_SETUSER": FILE_CONFIG.get("cmd_setuser", "!setuser").strip().lower(),
     "CMD_SETSTYLE": FILE_CONFIG.get("cmd_setstyle", "!setstyle").strip().lower(),
-    "CMD_SETCOLOR": FILE_CONFIG.get("cmd_setcolor", "!setcolor").strip().lower(),
+    "CMD_SETCOLOR": FILE_CONFIG.get("cmd_setcolor", "!setaccent").strip().lower(),
     "CMD_HELP": FILE_CONFIG.get("cmd_help", "!fmhelp").strip().lower(),
     "CMD_BWK": FILE_CONFIG.get("cmd_bwk", "!bwk").strip().lower(),
     "CMD_BWHOKNOWS": FILE_CONFIG.get("cmd_bwhoknows", "!bwhoknows").strip().lower(),
@@ -2059,7 +2059,7 @@ class BetterFMBot:
 
     async def handle_set_color(self, room: MatrixRoom, event: RoomMessageText, parts: list):
         """
-        !setcolor [<#rrggbb> | <rrggbb>]
+        !setaccent [<#rrggbb> | <rrggbb>]
 
         Sets the user's main accent colour, which tints the accent-coloured text & UI in
         every style preset. Called with no argument, it resets back to the neutral
