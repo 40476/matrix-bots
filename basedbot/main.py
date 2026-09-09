@@ -894,15 +894,15 @@ class BasedMatrixBot:
             parent_clean_body = " ".join(parent_clean_lines).strip()
 
             # Perform the approximate word edit distance check (allowing up to 1 word added or removed)
-            if not is_approximate_match(parent_clean_body, query_text):
-                print(f"[-] Match failed! '{query_text}' differs by more than 1 word from '{parent_clean_body}' (case-insensitive, ignoring emojis).")
-                mismatch_reply = (
-                    f"⚠️ **Text Match Failed!**\n\n"
-                    f"Your caption `\"{query_text}\"` does not sufficiently match the message you replied to.\n"
-                    f"Please verify your caption quotes the text accurately (you can add or remove at most one word, ignoring emojis)!"
-                )
-                await self.send_help_reply(room.room_id, event.event_id, mismatch_reply)
-                return
+            # if not is_approximate_match(parent_clean_body, query_text):
+            #     print(f"[-] Match failed! '{query_text}' differs by more than 1 word from '{parent_clean_body}' (case-insensitive, ignoring emojis).")
+            #     mismatch_reply = (
+            #         f"⚠️ **Text Match Failed!**\n\n"
+            #         f"Your caption `\"{query_text}\"` does not sufficiently match the message you replied to.\n"
+            #         f"Please verify your caption quotes the text accurately (you can add or remove at most one word, ignoring emojis)!"
+            #     )
+            #     await self.send_help_reply(room.room_id, event.event_id, mismatch_reply)
+            #     return
                 
             print(f"[+] Match successful! Fetching profile picture for {target_user_id}.")
             image_bytes = await self.get_target_avatar(target_user_id)
