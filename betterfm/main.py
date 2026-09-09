@@ -984,6 +984,17 @@ def _build_animated_style_presets() -> Dict[str, str]:
     presets["vinyl_spin_gif"] = vinyl_header + "".join(f"---FRAME---\n{f}" for f in spin_frames)
 
     # --- Bouncing equalizer bars, higher framerate (12 bars-frames at 50ms) ---
+    eq_header = (
+        "canvas 1000 260 #0d0d12\n"
+        "delay 20\n"
+        "rect 20 20 200 200 #1a1a22\n"
+        "image 20 20 200 200 {album_art}\n"
+        "text 240 40 {artist} #ffffff 24 bold\n"
+        "text 240 78 {title} #ff5fa2 19 bold\n"
+        "text 240 112 {album} #9aa0aa 14 italic\n"
+        "text 240 220 {activity} #7d8590 12\n"
+    )
+    
     start_x = 240
     total_width = 720  # Total horizontal space available (e.g., up to x = 960)
     num_bars = 16      # Total number of bars you want
