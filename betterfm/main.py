@@ -6,12 +6,15 @@ Features:
 - Dynamic weekly/daily scrobble stats (!fmstats).
 - Custom database to pair Matrix IDs with Last.fm accounts (!setuser).
 - Configurable style presets and a secure, sandboxed custom canvas rendering language (!setstyle / custom layout definitions).
-- Animated, looping GIF style presets (pulsing glow, spinning vinyl label, bouncing equalizer)
-  plus generic per-image `rotate=` support and a `---FRAME---` directive so custom styles can
-  define their own multi-frame animations too.
+- Animated, looping GIF style presets (pulsing glow, spinning vinyl label, bouncing equalizer,
+  neon ring, CRT scanline sweep) plus generic per-image `rotate=`/`mask=circle` support and a
+  `---FRAME---` directive so custom styles can define their own multi-frame animations too.
+- Control-flow scripting in the canvas DSL: `loop N ... endloop`, `if <a> <op> <b> ... endif`,
+  and arithmetic `{...}` expressions over `{i}` (loop index) and `{f}` (frame index) - all
+  parsed by a tiny sandboxed evaluator (no eval), enabling complex generated effects.
 - "Who Knows" leaderboard (!bwk / !bwhoknows): ranks every user registered with this bot by
-  how many times they've scrobbled a given artist (defaulting to the caller's own top artist)
-  over roughly the last 4 years, always surfacing the caller's own rank even outside the top 10.
+  how many times they've scrobbled a given artist of all time (defaulting to the caller's own
+  top artist), always surfacing the caller's own rank even outside the top 10.
 - Wiki/bio lookup (!wiki): pulls a cleaned-up Last.fm wiki summary for a track (falling back to
   the artist's biography), defaulting to the caller's current or most recent track.
 - Extremely secure layout parsing engine (no eval, no path traversals, strict validation).
@@ -59,9 +62,6 @@ logger = logging.getLogger("betterFM")
 
 # --- Configuration & Defaults ---
 CONFIG_PATH = os.getenv("BETTERFM_CONFIG", "config.json")
-
-# How many years back the !bwk / !bwhoknows leaderboard looks when tallying scrobbles.
-WHOKNOWS_YEARS = 4
 
 def setup_config() -> bool:
     """Checks for configuration, prompting the user interactively if missing."""
@@ -650,24 +650,38 @@ class LastFMClient:
             return None
         return artists[0].get("name")
 
-    async def get_artist_playcount(self, username: str, artist: str, since_ts: Optional[int] = None) -> int:
+    async def get_artist_playcount(self, username: str, artist: str) -> int:
         """
-        Returns how many times `username` has scrobbled `artist`, optionally restricted to
-        scrobbles at or after `since_ts` (epoch seconds). Backs the !bwk / !bwhoknows leaderboard.
+        Returns how many times `username` has scrobbled `artist` across their whole
+        library (all-time). Backs the !bwk / !bwhoknows leaderboard.
 
-        Uses user.getArtistTracks, which is the one Last.fm endpoint that accepts a raw
-        startTimestamp filter for an individual artist - this gives an honest "last N years"
-        count instead of the lifetime-only totals exposed by artist.getInfo(username=...).
+        Uses artist.getInfo with a `username`, which returns the clean all-time
+        per-user play count (`artist.stats.userplaycount`). This is much more
+        reliable than the old approach of paging user.getArtistTracks with a
+        startTimestamp filter - which frequently returned no/zero data and left
+        the leaderboard looking dead. Falls back to getArtistTracks' @attr.total
+        only if the preferred field is ever missing.
         """
-        params = {
+        data = await self._fetch({
+            "method": "artist.getinfo",
+            "artist": artist,
+            "username": username,
+        })
+        if data and "artist" in data:
+            stats = data["artist"].get("stats", {}) if isinstance(data["artist"], dict) else {}
+            userplays = stats.get("userplaycount")
+            if userplays is not None:
+                try:
+                    return int(userplays)
+                except (TypeError, ValueError):
+                    pass
+
+        # Defensive fallback: all-time total from user.getArtistTracks (no time filter).
+        data = await self._fetch({
             "method": "user.getartisttracks",
             "user": username,
             "artist": artist,
-        }
-        if since_ts:
-            params["startTimestamp"] = str(since_ts)
-
-        data = await self._fetch(params)
+        })
         if not data:
             return 0
 
@@ -680,7 +694,7 @@ class LastFMClient:
             except (TypeError, ValueError):
                 pass
 
-        # Defensive fallback if the API ever omits the @attr.total summary field
+        # Last-resort defensive fallback if the API ever omits the @attr.total summary field
         tracks = block.get("track", []) if isinstance(block, dict) else []
         if isinstance(tracks, dict):
             tracks = [tracks]
@@ -928,28 +942,29 @@ def _build_animated_style_presets() -> Dict[str, str]:
     """
     presets: Dict[str, str] = {}
 
-    # --- Pulsing neon glow ring around the cover art ---
+    # --- Pulsing neon glow ring, with the cover art perfectly centred on the frame ---
     pulse_header = (
-        "canvas 500 300 #101014\n"
-        "delay 140\n"
-        "text 250 45 {artist} #ffffff 26 bold\n"
-        "text 250 90 {title} #39ff88 20 bold\n"
-        "text 250 130 {album} #9aa0aa 15 italic\n"
-        "text 250 250 {activity} #7d8590 13\n"
+        "canvas 560 620 #0e0e12\n"
+        "delay 60\n"
+        "text 150 475 {artist} #ffffff 28 bold\n"
+        "text 150 520 {title} #39ff88 22 bold\n"
+        "text 150 562 {album} #9aa0aa 16 italic\n"
+        "text 280 600 {activity} #7d8590 13\n"
     )
-    glow_alphas = [40, 90, 150, 210, 255, 210, 150, 90]
+    # 16 frames of glow breathing behind a fixed, centred art block (box 150-410, centre x=280).
+    glow_alphas = [40, 90, 150, 210, 255, 210, 150, 90] * 2
     pulse_frames = [
-        f"rect 8 8 232 232 #39ff88{a:02x}\n"
-        "rect 20 20 210 210 #14141c\n"
-        "image 20 20 210 210 {album_art}\n"
+        "rect 124 124 436 436 #39ff88%02x\n" % a
+        + "rect 150 150 410 410 #191922\n"
+        + "image 150 150 260 260 {album_art}\n"
         for a in glow_alphas
     ]
     presets["pulse_glow_gif"] = pulse_header + "".join(f"---FRAME---\n{f}" for f in pulse_frames)
 
-    # --- Spinning center label, vinyl-style ---
+    # --- Spinning center label, vinyl-style (art masked to a clean disc + centre spindle) ---
     vinyl_header = (
         "canvas 400 460 #0a0a0c\n"
-        "delay 100\n"
+        "delay 50\n"
         "ellipse 40 40 360 360 #16161a\n"
         "ellipse 100 100 300 300 #1e1e22\n"
         "ellipse 165 165 235 235 #000000\n"
@@ -957,13 +972,21 @@ def _build_animated_style_presets() -> Dict[str, str]:
         "text 40 412 {title} #39d0ff 17 bold\n"
         "text 40 440 {activity} #8a8f98 12\n"
     )
-    spin_frames = [f"image 165 165 70 70 {{album_art}} rotate={deg}\n" for deg in range(0, 360, 45)]
+    # 24 frames at 50ms (~20fps). mask=circle keeps the rotating art inside the label ring
+    # (no more square corners chopping into the grooves), and a spindle hole + shine on top.
+    spin_frames = []
+    for deg in range(0, 360, 15):
+        spin_frames.append(
+            f"image 165 165 70 70 {{album_art}} rotate={deg} mask=circle\n"
+            "ellipse 192 192 208 208 #0a0a0c\n"
+            "ellipse 197 197 203 203 #ffffff55\n"
+        )
     presets["vinyl_spin_gif"] = vinyl_header + "".join(f"---FRAME---\n{f}" for f in spin_frames)
 
-    # --- Bouncing equalizer bars ---
+    # --- Bouncing equalizer bars, higher framerate (12 bars-frames at 50ms) ---
     eq_header = (
-        "canvas 500 260 #0d0d12\n"
-        "delay 130\n"
+        "canvas 1000 260 #0d0d12\n"
+        "delay 50\n"
         "rect 20 20 200 200 #1a1a22\n"
         "image 20 20 200 200 {album_art}\n"
         "text 240 40 {artist} #ffffff 24 bold\n"
@@ -972,16 +995,67 @@ def _build_animated_style_presets() -> Dict[str, str]:
         "text 240 220 {activity} #7d8590 12\n"
     )
     bar_x_positions = [240, 268, 296, 324, 352]
-    n_frames = 8
+    n_frames = 12
     eq_frames = []
     for f in range(n_frames):
         bar_lines = ""
         for i, x in enumerate(bar_x_positions):
-            height = int(15 + 45 * abs(math.sin((f / n_frames) * 2 * math.pi + i * 0.8)))
+            height = int(15 + 48 * abs(math.sin((f / n_frames) * 2 * math.pi + i * 0.8)))
             y0 = 200 - height
             bar_lines += f"rect {x} {y0} {x + 18} 200 #ff5fa2\n"
         eq_frames.append(bar_lines)
     presets["equalizer_gif"] = eq_header + "".join(f"---FRAME---\n{f}" for f in eq_frames)
+
+    # --- Neon ring: breathing double halo with cycling colours around centred art ---
+    ring_header = (
+        "canvas 560 620 #07070b\n"
+        "delay 40\n"
+        "text 150 470 {artist} #ffffff 28 bold\n"
+        "text 150 515 {title} #5ce8ff 22 bold\n"
+        "text 150 557 {album} #9aa0aa 16 italic\n"
+        "text 280 595 {activity} #7d8590 13\n"
+    )
+    ring_colors = ["#ff3366", "#ff9933", "#ffdd00", "#66ff33", "#33ffcc", "#33ccff", "#6644ff", "#cc33ff"]
+    n_ring_frames = 24
+    ring_frames = []
+    for k in range(n_ring_frames):
+        phase = (k / n_ring_frames) * 2 * math.pi
+        color = ring_colors[k % len(ring_colors)]
+        a1 = int(120 + 80 * math.sin(phase))
+        a2 = int(120 - 80 * math.sin(phase))
+        s1 = int(12 * math.sin(phase))
+        s2 = int(-12 * math.sin(phase))
+        # Two concentric pulsing frames centred on the art block (150-410, centre 280).
+        ring_frames.append(
+            f"rect {150-s1*2} {150-s1*2} {410+s1*2} {410+s1*2} {color}{a1:02x}\n"
+            f"rect {150-s2*2} {150-s2*2} {410+s2*2} {410+s2*2} #0d0d18\n"
+            f"image 150 150 260 260 {{album_art}}\n"
+        )
+    presets["neon_ring_gif"] = ring_header + "".join(f"---FRAME---\n{f}" for f in ring_frames)
+
+    # --- CRT scanline sweep: blurred backdrop + indicator + soft scanlines (loop) + a bright
+    #     head that sweeps down using {f}; demonstrates the new loop/if/expression scripting ---
+    crt_header = (
+        "canvas 560 320 #0a0a0e\n"
+        "delay 40\n"
+        "image 0 0 560 320 {album_art} 18\n"
+        "rect 0 0 560 320 #00000060\n"
+        "image 34 34 212 212 {album_art}\n"
+        "text 264 40 {artist} #ffffff 24 bold\n"
+        "text 264 78 {title} #ff8a3d 19 bold\n"
+        "loop 40\n"
+        "  rect 0 {i*8} 560 {i*8+1} #0000001e\n"
+        "endloop\n"
+    )
+    n_crt_frames = 16
+    crt_frames = []
+    for f in range(n_crt_frames):
+        y = f * 20
+        crt_frames.append(
+            f"rect 0 {y} 560 {y + 12} #6bff9f\n"
+            f"rect 0 {y + 13} 560 {y + 14} #ffffff\n"
+        )
+    presets["scanline_crt_gif"] = crt_header + "".join(f"---FRAME---\n{f}" for f in crt_frames)
 
     return presets
 
@@ -1044,10 +1118,239 @@ class SecureRenderer:
                 parts = stripped.split()
                 if len(parts) >= 2:
                     try:
-                        return min(max(int(parts[1]), 20), 2000)
+                        return min(max(int(parts[1]), 5), 2000)
                     except ValueError:
                         pass
         return 120
+
+# Known metadata placeholder keys - these are left untouched by the math expression
+    # substitution below (they get replaced later by the text/image handlers).
+    KNOWN_TOKENS = frozenset(["album_art", "artist", "title", "album", "username", "activity"])
+
+    @classmethod
+    def _expand_control(cls, lines: List[str], env: Dict[str, Any]) -> List[str]:
+        """
+        Expands the DSL's control-flow sugar into plain drawing directives:
+
+            loop <N>
+                ... directives (may use {i} and arithmetic like {i*40})
+            endloop
+
+            if <expr> <op> <expr>
+                ... directives (run only when the comparison is true)
+            endif
+
+        Each `<expr>` is an integer arithmetic expression that may contain the
+        loop index `i` and/or the frame index `f`, with `+ - * / % ( )` and also
+        braces, e.g. `if {i} % 4 == 0` or `if {f%2}` ... `<op>` is one of
+        `== != < <= > >=`. With no operator the whole expression is treated as a
+        truth value (non-zero runs the body). Loops and ifs may be nested.
+        Everything is parsed by a tiny sandboxed evaluator - never eval() - so
+        the environment stays safe.
+        """
+        out: List[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                out.append(line)
+                i += 1
+                continue
+
+            low = stripped.lower()
+            if low.startswith("loop "):
+                parts = stripped.split()
+                try:
+                    count = max(0, min(int(parts[1]), 1000))
+                except (ValueError, IndexError):
+                    count = 0
+                block, i = cls._grab_block(lines, i, "loop")
+                for it in range(count):
+                    inner_env = dict(env)
+                    inner_env["i"] = it
+                    out.extend(cls._expand_control(block, inner_env))
+                continue
+
+            if low.startswith("if "):
+                block, i = cls._grab_block(lines, i, "if")
+                cond_tokens = stripped.split()[1:]
+                # Find the comparison operator among the condition tokens.
+                op_idx = None
+                _COMPARE_OPS = ("==", "!=", "<=", ">=", "<", ">")
+                for _idx, _tok in enumerate(cond_tokens):
+                    if _tok in _COMPARE_OPS:
+                        op_idx = _idx
+                        break
+                take = False
+                if op_idx is None:
+                    # No operator - the whole expression is a truth value.
+                    take = cls._eval_expr("".join(cond_tokens), env) != 0 if cond_tokens else False
+                elif op_idx + 1 < len(cond_tokens):
+                    left = "".join(cond_tokens[:op_idx])
+                    op = cond_tokens[op_idx]
+                    right = "".join(cond_tokens[op_idx + 1:])
+                    take = cls._compare(cls._eval_expr(left, env), op, cls._eval_expr(right, env))
+                if take:
+                    out.extend(cls._expand_control(block, env))
+                continue
+
+            # Stray endloop/endif - drop it defensively (should already be consumed).
+            if low == "endloop" or low == "endif":
+                i += 1
+                continue
+
+            out.append(cls._substitute_exprs(lines[i], env))
+            i += 1
+        return out
+
+    @classmethod
+    def _grab_block(cls, lines: List[str], start: int, kind: str) -> Tuple[List[str], int]:
+        """
+        Collects the body of a `loop`/`if` block opened at `lines[start]`, handling
+        arbitrary nesting, and returns (body_lines, index_after_closer).
+        """
+        depth = 0
+        j = start
+        body: List[str] = []
+        while j < len(lines):
+            low = lines[j].strip().lower()
+            if low.startswith("loop ") or low.startswith("if "):
+                depth += 1
+            if low == "endloop" or low == "endif":
+                depth -= 1
+                if depth <= 0:
+                    return body, j + 1
+            if j != start:
+                body.append(lines[j])
+            j += 1
+        # Unclosed block: treat the rest of the script as the body (defensive).
+        return body, len(lines)
+
+    @classmethod
+    def _substitute_exprs(cls, text: str, env: Dict[str, Any]) -> str:
+        """Replaces `{...}` arithmetic expressions (over i/f) with their integer values."""
+
+        def repl(match):
+            inner = match.group(1).strip()
+            if inner in cls.KNOWN_TOKENS:
+                return match.group(0)  # leave metadata placeholders alone
+            try:
+                return str(cls._eval_expr(inner, env))
+            except Exception:
+                return match.group(0)  # leave anything we can't parse untouched
+
+        return re.sub(r"\{([^{}]*)\}", repl, text)
+
+    @classmethod
+    def _tokenize_expr(cls, expr: str) -> List[Any]:
+        tokens: List[Any] = []
+        num = ""
+        i = 0
+        chars = list(expr)
+
+        def flush():
+            nonlocal num
+            if num:
+                tokens.append(int(num))
+                num = ""
+
+        while i < len(chars):
+            c = chars[i]
+            if c.isdigit():
+                num += c
+            elif c == "i" or c == "f":
+                flush()
+                tokens.append(c)
+            elif c in "+-*/%()":
+                flush()
+                tokens.append(c)
+            elif c.isspace():
+                flush()
+            i += 1
+        flush()
+        return tokens
+
+    @classmethod
+    def _eval_expr(cls, expr: str, env: Dict[str, Any]) -> int:
+        """Evaluates a tiny integer arithmetic expression; the only variables are the
+        loop index `i` and frame index `f` pulled from `env`. No eval, no builtins."""
+        expr = (expr or "").strip()
+        if not expr:
+            return 0
+        tokens = cls._tokenize_expr(expr)
+        pos = [0]
+
+        def peek():
+            return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+        def advance():
+            t = tokens[pos[0]]
+            pos[0] += 1
+            return t
+
+        def primary():
+            t = peek()
+            if t is None:
+                return 0
+            if t in ("+", "-"):
+                advance()
+                v = primary()
+                return v if t == "+" else -v
+            if t == "(":
+                advance()
+                v = expression()
+                if peek() == ")":
+                    advance()
+                return v
+            if t == "i" or t == "f":
+                advance()
+                return int(env.get(t, 0))
+            if isinstance(t, int):
+                advance()
+                return t
+            advance()  # unknown token - skip it harmlessly
+            return 0
+
+        def term():
+            value = primary()
+            while peek() in ("*", "/", "%"):
+                op = advance()
+                rhs = primary()
+                if op == "*":
+                    value = value * rhs
+                elif op == "%":
+                    value = value % rhs if rhs else 0
+                else:
+                    value = value // rhs if rhs else 0
+            return value
+
+        def expression():
+            value = term()
+            while peek() in ("+", "-"):
+                op = advance()
+                rhs = term()
+                value = value + rhs if op == "+" else value - rhs
+            return value
+
+        return expression()
+
+    @classmethod
+    def _compare(cls, left: int, op: str, right: int) -> bool:
+        if op == "==":
+            return left == right
+        if op == "!=":
+            return left != right
+        if op == "<":
+            return left < right
+        if op == "<=":
+            return left <= right
+        if op == ">":
+            return left > right
+        if op == ">=":
+            return left >= right
+        return False
 
     @classmethod
     def _draw_frame(
@@ -1057,8 +1360,11 @@ class SecureRenderer:
         bg_color: Tuple[int, int, int, int],
         replacements: Dict[str, str],
         album_art_img: Image.Image,
+        frame_index: int = 0,
     ) -> Image.Image:
         """Draws one full frame's worth of directives onto a fresh RGBA canvas and returns it."""
+        # Expand loop/if script sugar, exposing {f} (frame index) so scripts can animate.
+        lines = cls._expand_control(lines, {"i": 0, "f": frame_index})
         img = Image.new("RGBA", canvas_size, bg_color)
         draw = ImageDraw.Draw(img)
 
@@ -1102,10 +1408,12 @@ class SecureRenderer:
                 elif cmd == "image" and len(parts) >= 5:
                     x, y, w, h = map(int, parts[1:5])
 
-                    # Search all remaining arguments securely for a blur radius (bare digits)
-                    # and/or a "rotate=<deg>" directive that powers the spinning-label styles.
+                    # Search all remaining arguments securely for a blur radius (bare digits),
+                    # a "rotate=<deg>" directive that powers the spinning-label styles, and/or
+                    # a "mask=circle" directive that crops the art into a clean disc.
                     blur_val = 0
                     rotate_val = 0
+                    mask_circle = False
                     for p in parts[5:]:
                         if p.isdigit():
                             blur_val = min(max(int(p), 0), 100)
@@ -1114,13 +1422,20 @@ class SecureRenderer:
                                 rotate_val = int(p.split("=", 1)[1]) % 360
                             except ValueError:
                                 pass
+                        elif p.lower() == "mask=circle":
+                            mask_circle = True
 
                     resized_art = album_art_img.resize((w, h), Image.Resampling.LANCZOS)
 
                     if rotate_val:
                         rotated = resized_art.rotate(rotate_val, resample=Image.Resampling.BICUBIC, expand=True)
-                        # Re-center the (now larger, due to expand=True) rotated image back
-                        # into a canvas the same size as the original box so layout stays fixed.
+                        # The rotated image's bounding box grows larger at diagonal angles.
+                        # Downscale it to fit inside the target box instead of cropping with a
+                        # negative offset - which used to chop the corners off spinning labels.
+                        if rotated.width > w or rotated.height > h:
+                            rotated.thumbnail((w, h), Image.Resampling.LANCZOS)
+                        # Re-center the image back into a box the same size as the original
+                        # target so the layout stays fixed.
                         centered = Image.new("RGBA", (w, h), (0, 0, 0, 0))
                         offset = ((w - rotated.width) // 2, (h - rotated.height) // 2)
                         centered.paste(rotated, offset, rotated)
@@ -1128,6 +1443,15 @@ class SecureRenderer:
 
                     if blur_val > 0:
                         resized_art = resized_art.filter(ImageFilter.GaussianBlur(blur_val))
+
+                    if mask_circle:
+                        # Crop into a perfect circle centred on the box - turns square album
+                        # art into a clean vinyl-style label even while it rotates.
+                        mask = Image.new("L", resized_art.size, 0)
+                        ImageDraw.Draw(mask).ellipse(
+                            [0, 0, resized_art.width - 1, resized_art.height - 1], fill=255
+                        )
+                        resized_art.putalpha(mask)
 
                     img.alpha_composite(resized_art, (x, y))
 
@@ -1239,13 +1563,13 @@ class SecureRenderer:
 
         rendered_frames = []
         if frame_blocks:
-            for frame_lines in frame_blocks:
+            for f_idx, frame_lines in enumerate(frame_blocks):
                 combined = header_lines + frame_lines
-                frame_img = cls._draw_frame(combined, (canvas_width, canvas_height), bg_color, replacements, album_art_img)
+                frame_img = cls._draw_frame(combined, (canvas_width, canvas_height), bg_color, replacements, album_art_img, frame_index=f_idx)
                 rendered_frames.append(frame_img.convert("RGB"))
         else:
             # Defensive fallback: a marker with nothing after it just renders the header once.
-            frame_img = cls._draw_frame(header_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img)
+            frame_img = cls._draw_frame(header_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img, frame_index=0)
             rendered_frames.append(frame_img.convert("RGB"))
 
         output = BytesIO()
@@ -1370,8 +1694,8 @@ class BetterFMBot:
             f"- `{CONFIG['CMD_STATS']} [user] [daily/monthly/overall]` - Fetches playstats and top tracks.\n"
             f"- `{CONFIG['CMD_SETUSER']} <lastfm_username>` - Links your Matrix ID to your Last.fm account.\n"
             f"- `{CONFIG['CMD_SETSTYLE']} <preset>` - Switches your design theme.\n"
-            f"- `{CONFIG['CMD_SETSTYLE']} custom <directives>` - Saves a custom canvas design (add `---FRAME---` blocks for your own looping GIF!).\n"
-            f"- `{CONFIG['CMD_BWK']} [artist]` (alias `{CONFIG['CMD_BWHOKNOWS']}`) - Who Knows leaderboard: ranks everyone registered with this bot by scrobbles of that artist over the last {WHOKNOWS_YEARS} years. Leave the artist blank to use your own #1 artist.\n"
+            f"- `{CONFIG['CMD_SETSTYLE']} custom <directives>` - Saves a custom canvas design (add `---FRAME---` blocks for an animated GIF; script with `loop N ... endloop`, `if`/`endif`, and `{{i}}`/`{{f}}` `{{...}}` math for complex effects).\n"
+            f"- `{CONFIG['CMD_BWK']} [artist]` (alias `{CONFIG['CMD_BWHOKNOWS']}`) - Who Knows leaderboard: ranks everyone registered with this bot by scrobbles of that artist (all-time). Leave the artist blank to use your own #1 artist.\n"
             f"- `{CONFIG['CMD_WIKI']} [artist] - [title]` - Looks up a short wiki entry for a track (falls back to the artist's bio). Leave blank to use your current/last track.\n"
             f"- `{CONFIG['CMD_HELP']}` - Shows this help menu.\n\n"
             "**Available Presets** (`_gif` presets are animated & loop):\n"
@@ -1699,11 +2023,10 @@ class BetterFMBot:
     async def handle_bwk(self, room: MatrixRoom, event: RoomMessageText, parts: list):
         """
         !bwk / !bwhoknows [artist] - Leaderboard of everyone registered with this bot,
-        ranked by how many times each of them has scrobbled the given artist over the
-        last WHOKNOWS_YEARS years. If no artist is given, defaults to the caller's own
-        all-time #1 artist. Ties are broken in the caller's favor (their "highest valid
-        spot"), and the caller's own rank is always shown even if they land outside the
-        top 10.
+        ranked by how many times each of them has scrobbled the given artist of all time.
+        If no artist is given, defaults to the caller's own all-time #1 artist. Ties are
+        broken in the caller's favor (their "highest valid spot"), and the caller's own rank
+        is always shown even if they land outside the top 10.
         """
         sender = event.sender
         caller_lastfm = get_user_lastfm(sender)
@@ -1757,11 +2080,10 @@ class BetterFMBot:
                 )
                 return
 
-            since_ts = int(time.time()) - (WHOKNOWS_YEARS * 365 * 24 * 3600)
             lastfm_names = list(seen_lastfm.keys())
 
             results = await asyncio.gather(
-                *[self.lastfm.get_artist_playcount(name, artist_query, since_ts) for name in lastfm_names],
+                *[self.lastfm.get_artist_playcount(name, artist_query) for name in lastfm_names],
                 return_exceptions=True
             )
 
@@ -1783,13 +2105,13 @@ class BetterFMBot:
             caller_entry = next((e for e in leaderboard if e["is_caller"]), None)
 
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-            lines = [f"🏆 **Who Knows \"{artist_query}\"** (last {WHOKNOWS_YEARS} years)"]
+            lines = [f"🏆 **Who Knows \"{artist_query}\"** (all-time)"]
 
             ranked = [e for e in leaderboard if e["plays"] > 0]
             top10 = ranked[:10]
 
             if not top10:
-                lines.append(f"Nobody registered with this bot has scrobbled **{artist_query}** in that window.")
+                lines.append(f"Nobody registered with this bot has scrobbled **{artist_query}** yet.")
             else:
                 for idx, entry in enumerate(top10, start=1):
                     prefix = medals.get(idx, f"{idx}.")
