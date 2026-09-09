@@ -6,6 +6,14 @@ Features:
 - Dynamic weekly/daily scrobble stats (!fmstats).
 - Custom database to pair Matrix IDs with Last.fm accounts (!setuser).
 - Configurable style presets and a secure, sandboxed custom canvas rendering language (!setstyle / custom layout definitions).
+- Animated, looping GIF style presets (pulsing glow, spinning vinyl label, bouncing equalizer)
+  plus generic per-image `rotate=` support and a `---FRAME---` directive so custom styles can
+  define their own multi-frame animations too.
+- "Who Knows" leaderboard (!bwk / !bwhoknows): ranks every user registered with this bot by
+  how many times they've scrobbled a given artist (defaulting to the caller's own top artist)
+  over roughly the last 4 years, always surfacing the caller's own rank even outside the top 10.
+- Wiki/bio lookup (!wiki): pulls a cleaned-up Last.fm wiki summary for a track (falling back to
+  the artist's biography), defaulting to the caller's current or most recent track.
 - Extremely secure layout parsing engine (no eval, no path traversals, strict validation).
 - Interactive first-time CLI setup wizard with config file generation.
 - Automated room invite-joining mechanism with retry safety logic.
@@ -29,10 +37,12 @@ import os
 import re
 import json
 import time
+import math
+import html
 import asyncio
 import logging
 from io import BytesIO
-from typing import Dict, Any, Tuple, Optional, Union
+from typing import Dict, Any, Tuple, Optional, Union, List
 from urllib.parse import quote, quote_plus
 
 # Third party dependencies
@@ -49,6 +59,9 @@ logger = logging.getLogger("betterFM")
 
 # --- Configuration & Defaults ---
 CONFIG_PATH = os.getenv("BETTERFM_CONFIG", "config.json")
+
+# How many years back the !bwk / !bwhoknows leaderboard looks when tallying scrobbles.
+WHOKNOWS_YEARS = 4
 
 def setup_config() -> bool:
     """Checks for configuration, prompting the user interactively if missing."""
@@ -91,7 +104,10 @@ def setup_config() -> bool:
         "cmd_stats": "!fmstats",
         "cmd_setuser": "!setuser",
         "cmd_setstyle": "!setstyle",
-        "cmd_help": "!fmhelp"
+        "cmd_help": "!fmhelp",
+        "cmd_bwk": "!bwk",
+        "cmd_bwhoknows": "!bwhoknows",
+        "cmd_wiki": "!wiki"
     }
     
     try:
@@ -130,6 +146,9 @@ CONFIG = {
     "CMD_SETUSER": FILE_CONFIG.get("cmd_setuser", "!setuser").strip().lower(),
     "CMD_SETSTYLE": FILE_CONFIG.get("cmd_setstyle", "!setstyle").strip().lower(),
     "CMD_HELP": FILE_CONFIG.get("cmd_help", "!fmhelp").strip().lower(),
+    "CMD_BWK": FILE_CONFIG.get("cmd_bwk", "!bwk").strip().lower(),
+    "CMD_BWHOKNOWS": FILE_CONFIG.get("cmd_bwhoknows", "!bwhoknows").strip().lower(),
+    "CMD_WIKI": FILE_CONFIG.get("cmd_wiki", "!wiki").strip().lower(),
 }
 
 # Ensure cache directory exists
@@ -178,6 +197,25 @@ def set_user_style(matrix_id: str, style_name_or_spec: str):
         db["users"][matrix_id] = {}
     db["users"][matrix_id]["style"] = style_name_or_spec
     save_db(db)
+
+
+# --- Wiki text cleanup helper ---
+_WIKI_TAG_RE = re.compile(r"<[^>]+>")
+
+def clean_wiki_text(raw: str, max_len: int = 600) -> str:
+    """
+    Strips Last.fm's embedded HTML from wiki/bio text (including the trailing
+    '<a href="...">Read more on Last.fm</a>' boilerplate every wiki blob ships with),
+    unescapes HTML entities, and truncates to a reasonable chat-friendly length.
+    """
+    if not raw:
+        return ""
+    text = _WIKI_TAG_RE.sub("", raw)
+    text = html.unescape(text).strip()
+    if len(text) > max_len:
+        truncated = text[:max_len].rsplit(" ", 1)[0]
+        text = truncated + "…"
+    return text
 
 
 # --- Last.fm API Client ---
@@ -595,6 +633,102 @@ class LastFMClient:
             "period": period
         }
 
+    async def get_top_artist(self, username: str, period: str = "overall") -> Optional[str]:
+        """Returns the display name of a user's #1 most-played artist (all-time by default)."""
+        data = await self._fetch({
+            "method": "user.gettopartists",
+            "user": username,
+            "period": period,
+            "limit": "1"
+        })
+        if not data or "topartists" not in data:
+            return None
+        artists = data["topartists"].get("artist", [])
+        if isinstance(artists, dict):
+            artists = [artists]
+        if not artists:
+            return None
+        return artists[0].get("name")
+
+    async def get_artist_playcount(self, username: str, artist: str, since_ts: Optional[int] = None) -> int:
+        """
+        Returns how many times `username` has scrobbled `artist`, optionally restricted to
+        scrobbles at or after `since_ts` (epoch seconds). Backs the !bwk / !bwhoknows leaderboard.
+
+        Uses user.getArtistTracks, which is the one Last.fm endpoint that accepts a raw
+        startTimestamp filter for an individual artist - this gives an honest "last N years"
+        count instead of the lifetime-only totals exposed by artist.getInfo(username=...).
+        """
+        params = {
+            "method": "user.getartisttracks",
+            "user": username,
+            "artist": artist,
+        }
+        if since_ts:
+            params["startTimestamp"] = str(since_ts)
+
+        data = await self._fetch(params)
+        if not data:
+            return 0
+
+        block = data.get("artisttracks", {})
+        attr = block.get("@attr", {}) if isinstance(block, dict) else {}
+        total = attr.get("total")
+        if total is not None:
+            try:
+                return int(total)
+            except (TypeError, ValueError):
+                pass
+
+        # Defensive fallback if the API ever omits the @attr.total summary field
+        tracks = block.get("track", []) if isinstance(block, dict) else []
+        if isinstance(tracks, dict):
+            tracks = [tracks]
+        return len(tracks)
+
+    async def get_wiki(self, artist: str, title: Optional[str] = None) -> Optional[Dict[str, str]]:
+        """
+        Fetches a wiki entry for a track. Most individual tracks don't have their own wiki
+        on Last.fm, so if `track.getInfo` comes back empty this falls back to the artist's
+        biography instead, so !wiki always has a decent shot at returning *something* useful.
+        """
+        if title:
+            data = await self._fetch({
+                "method": "track.getinfo",
+                "artist": artist,
+                "track": title,
+            })
+            if data and "track" in data:
+                track = data["track"]
+                wiki = track.get("wiki") or {}
+                text = wiki.get("summary") or wiki.get("content")
+                if text:
+                    track_artist = track.get("artist", {})
+                    artist_name = track_artist.get("name") if isinstance(track_artist, dict) else artist
+                    return {
+                        "subject": f"{artist_name} - {track.get('name', title)}",
+                        "text": text,
+                        "url": track.get("url", ""),
+                    }
+
+        # Fallback: the artist's own biography
+        data = await self._fetch({
+            "method": "artist.getinfo",
+            "artist": artist,
+        })
+        if data and "artist" in data:
+            art = data["artist"]
+            bio = art.get("bio") or {}
+            text = bio.get("summary") or bio.get("content")
+            if text:
+                return {
+                    "subject": art.get("name", artist),
+                    "text": text,
+                    "url": art.get("url", ""),
+                }
+
+        return None
+
 
 # --- SECURE CANVAS / RENDERING ENGINE Presets ---
 STYLE_PRESETS = {
@@ -781,8 +915,84 @@ STYLE_PRESETS = {
     )
 }
 
+
+def _build_animated_style_presets() -> Dict[str, str]:
+    """
+    Programmatically builds a few looping, animated GIF style presets.
+
+    Animated styles are written in the same tiny DSL as static ones, just split into
+    frames with a literal '---FRAME---' marker line. Everything *before* the first
+    marker is shared "header" content (canvas size, an optional `delay <ms>` line,
+    and any static text/background) that gets redrawn underneath every single frame;
+    everything after each marker is that frame's own extra directives layered on top.
+    """
+    presets: Dict[str, str] = {}
+
+    # --- Pulsing neon glow ring around the cover art ---
+    pulse_header = (
+        "canvas 500 300 #101014\n"
+        "delay 140\n"
+        "text 250 45 {artist} #ffffff 26 bold\n"
+        "text 250 90 {title} #39ff88 20 bold\n"
+        "text 250 130 {album} #9aa0aa 15 italic\n"
+        "text 250 250 {activity} #7d8590 13\n"
+    )
+    glow_alphas = [40, 90, 150, 210, 255, 210, 150, 90]
+    pulse_frames = [
+        f"rect 8 8 232 232 #39ff88{a:02x}\n"
+        "rect 20 20 210 210 #14141c\n"
+        "image 20 20 210 210 {album_art}\n"
+        for a in glow_alphas
+    ]
+    presets["pulse_glow_gif"] = pulse_header + "".join(f"---FRAME---\n{f}" for f in pulse_frames)
+
+    # --- Spinning center label, vinyl-style ---
+    vinyl_header = (
+        "canvas 400 460 #0a0a0c\n"
+        "delay 100\n"
+        "ellipse 40 40 360 360 #16161a\n"
+        "ellipse 100 100 300 300 #1e1e22\n"
+        "ellipse 165 165 235 235 #000000\n"
+        "text 40 380 {artist} #ffffff 22 bold\n"
+        "text 40 412 {title} #39d0ff 17 bold\n"
+        "text 40 440 {activity} #8a8f98 12\n"
+    )
+    spin_frames = [f"image 165 165 70 70 {{album_art}} rotate={deg}\n" for deg in range(0, 360, 45)]
+    presets["vinyl_spin_gif"] = vinyl_header + "".join(f"---FRAME---\n{f}" for f in spin_frames)
+
+    # --- Bouncing equalizer bars ---
+    eq_header = (
+        "canvas 500 260 #0d0d12\n"
+        "delay 130\n"
+        "rect 20 20 200 200 #1a1a22\n"
+        "image 20 20 200 200 {album_art}\n"
+        "text 240 40 {artist} #ffffff 24 bold\n"
+        "text 240 78 {title} #ff5fa2 19 bold\n"
+        "text 240 112 {album} #9aa0aa 14 italic\n"
+        "text 240 220 {activity} #7d8590 12\n"
+    )
+    bar_x_positions = [240, 268, 296, 324, 352]
+    n_frames = 8
+    eq_frames = []
+    for f in range(n_frames):
+        bar_lines = ""
+        for i, x in enumerate(bar_x_positions):
+            height = int(15 + 45 * abs(math.sin((f / n_frames) * 2 * math.pi + i * 0.8)))
+            y0 = 200 - height
+            bar_lines += f"rect {x} {y0} {x + 18} 200 #ff5fa2\n"
+        eq_frames.append(bar_lines)
+    presets["equalizer_gif"] = eq_header + "".join(f"---FRAME---\n{f}" for f in eq_frames)
+
+    return presets
+
+
+STYLE_PRESETS.update(_build_animated_style_presets())
+
+
 class SecureRenderer:
     HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3,4}){1,2}$")
+    # Case-insensitive marker line that splits an animated style spec into frames.
+    FRAME_SEPARATOR = "---frame---"
 
     @classmethod
     def parse_color(cls, color_str: str) -> Tuple[int, int, int, int]:
@@ -803,18 +1013,18 @@ class SecureRenderer:
         return sanitized[:80]
 
     @classmethod
-    async def render_card(cls, track_info: Dict[str, Any], style_spec: str) -> BytesIO:
+    def is_animated(cls, style_spec: str) -> bool:
+        """An style spec is animated if it contains at least one '---FRAME---' marker line."""
+        return cls.FRAME_SEPARATOR in style_spec.lower()
+
+    @classmethod
+    def _extract_canvas_size(cls, lines: List[str]) -> Tuple[int, int, Tuple[int, int, int, int]]:
         canvas_width, canvas_height = 800, 250
         bg_color = (30, 30, 36, 255)
-        
-        lines = style_spec.split("\n")
-        
         for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if parts[0] == "canvas":
+            stripped = line.strip()
+            if stripped.startswith("canvas"):
+                parts = stripped.split()
                 if len(parts) >= 3:
                     try:
                         canvas_width = min(max(int(parts[1]), 100), 1200)
@@ -823,11 +1033,162 @@ class SecureRenderer:
                             bg_color = cls.parse_color(parts[3])
                     except ValueError:
                         pass
+                break
+        return canvas_width, canvas_height, bg_color
 
-        # Complete RGBA canvas backing for premium quality blending
-        img = Image.new("RGBA", (canvas_width, canvas_height), bg_color)
+    @classmethod
+    def _extract_delay(cls, lines: List[str]) -> int:
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("delay"):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    try:
+                        return min(max(int(parts[1]), 20), 2000)
+                    except ValueError:
+                        pass
+        return 120
+
+    @classmethod
+    def _draw_frame(
+        cls,
+        lines: List[str],
+        canvas_size: Tuple[int, int],
+        bg_color: Tuple[int, int, int, int],
+        replacements: Dict[str, str],
+        album_art_img: Image.Image,
+    ) -> Image.Image:
+        """Draws one full frame's worth of directives onto a fresh RGBA canvas and returns it."""
+        img = Image.new("RGBA", canvas_size, bg_color)
         draw = ImageDraw.Draw(img)
 
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("canvas") or line.startswith("delay"):
+                continue
+
+            parts = line.split()
+            if not parts:
+                continue
+            cmd = parts[0].lower()
+
+            try:
+                if cmd == "rect" and len(parts) >= 6:
+                    x0, y0, x1, y1 = map(int, parts[1:5])
+                    color = cls.parse_color(parts[5])
+                    # Handle true transparency alpha compositing to avoid overwrite artifacts
+                    if len(color) == 4 and color[3] < 255:
+                        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+                        overlay_draw = ImageDraw.Draw(overlay)
+                        overlay_draw.rectangle([x0, y0, x1, y1], fill=color)
+                        img = Image.alpha_composite(img, overlay)
+                        draw = ImageDraw.Draw(img)  # Re-establish context
+                    else:
+                        draw.rectangle([x0, y0, x1, y1], fill=color)
+
+                elif cmd == "ellipse" and len(parts) >= 6:
+                    x0, y0, x1, y1 = map(int, parts[1:5])
+                    color = cls.parse_color(parts[5])
+                    # Handle true transparency alpha compositing to avoid overwrite artifacts
+                    if len(color) == 4 and color[3] < 255:
+                        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+                        overlay_draw = ImageDraw.Draw(overlay)
+                        overlay_draw.ellipse([x0, y0, x1, y1], fill=color)
+                        img = Image.alpha_composite(img, overlay)
+                        draw = ImageDraw.Draw(img)  # Re-establish context
+                    else:
+                        draw.ellipse([x0, y0, x1, y1], fill=color)
+
+                elif cmd == "image" and len(parts) >= 5:
+                    x, y, w, h = map(int, parts[1:5])
+
+                    # Search all remaining arguments securely for a blur radius (bare digits)
+                    # and/or a "rotate=<deg>" directive that powers the spinning-label styles.
+                    blur_val = 0
+                    rotate_val = 0
+                    for p in parts[5:]:
+                        if p.isdigit():
+                            blur_val = min(max(int(p), 0), 100)
+                        elif p.lower().startswith("rotate="):
+                            try:
+                                rotate_val = int(p.split("=", 1)[1]) % 360
+                            except ValueError:
+                                pass
+
+                    resized_art = album_art_img.resize((w, h), Image.Resampling.LANCZOS)
+
+                    if rotate_val:
+                        rotated = resized_art.rotate(rotate_val, resample=Image.Resampling.BICUBIC, expand=True)
+                        # Re-center the (now larger, due to expand=True) rotated image back
+                        # into a canvas the same size as the original box so layout stays fixed.
+                        centered = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                        offset = ((w - rotated.width) // 2, (h - rotated.height) // 2)
+                        centered.paste(rotated, offset, rotated)
+                        resized_art = centered
+
+                    if blur_val > 0:
+                        resized_art = resized_art.filter(ImageFilter.GaussianBlur(blur_val))
+
+                    img.alpha_composite(resized_art, (x, y))
+
+                elif cmd == "blur" and len(parts) >= 2:
+                    radius = min(max(int(parts[1]), 1), 50)
+                    img = img.filter(ImageFilter.GaussianBlur(radius))
+                    draw = ImageDraw.Draw(img)
+
+                elif cmd == "text" and len(parts) >= 5:
+                    x, y = int(parts[1]), int(parts[2])
+
+                    color_idx = -1
+                    for idx, part in enumerate(parts[3:], start=3):
+                        if part.startswith("#"):
+                            color_idx = idx
+                            break
+
+                    if color_idx != -1:
+                        raw_text = " ".join(parts[3:color_idx])
+                        color = cls.parse_color(parts[color_idx])
+                        size = 18
+                        if len(parts) > color_idx + 1:
+                            try:
+                                size = min(max(int(parts[color_idx + 1]), 8), 72)
+                            except ValueError:
+                                pass
+                    else:
+                        raw_text = parts[3]
+                        color = (255, 255, 255, 255)
+                        size = 18
+
+                    for key, val in replacements.items():
+                        raw_text = raw_text.replace(key, val)
+
+                    font = None
+                    for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                                      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                                      "Arial", "Helvetica"]:
+                        try:
+                            font = ImageFont.truetype(font_path, size)
+                            break
+                        except IOError:
+                            continue
+
+                    if not font:
+                        font = ImageFont.load_default()
+
+                    draw.text((x, y), raw_text, fill=color, font=font)
+
+            except Exception as parse_error:
+                logger.warning(f"Failed parsing custom style line [{line}]: {parse_error}")
+
+        return img
+
+    @classmethod
+    async def render_card(cls, track_info: Dict[str, Any], style_spec: str) -> Tuple[BytesIO, str, str]:
+        """
+        Renders a now-playing card from a style spec.
+        Returns (image_bytes, mimetype, file_extension) - a plain PNG for static styles,
+        or an animated, infinitely-looping GIF for any style containing '---FRAME---' markers.
+        """
         album_art_img = None
         if track_info.get("album_art"):
             try:
@@ -852,109 +1213,53 @@ class SecureRenderer:
             "{activity}": cls.sanitize_metadata(track_info.get("activity", "Inactive")),
         }
 
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-                
-            parts = line.split()
-            cmd = parts[0].lower()
+        raw_lines = style_spec.split("\n")
 
-            try:
-                if cmd == "rect" and len(parts) >= 6:
-                    x0, y0, x1, y1 = map(int, parts[1:5])
-                    color = cls.parse_color(parts[5])
-                    # Handle true transparency alpha compositing to avoid overwrite artifacts
-                    if len(color) == 4 and color[3] < 255:
-                        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-                        overlay_draw = ImageDraw.Draw(overlay)
-                        overlay_draw.rectangle([x0, y0, x1, y1], fill=color)
-                        img = Image.alpha_composite(img, overlay)
-                        draw = ImageDraw.Draw(img) # Re-establish context
-                    else:
-                        draw.rectangle([x0, y0, x1, y1], fill=color)
+        if not cls.is_animated(style_spec):
+            canvas_width, canvas_height, bg_color = cls._extract_canvas_size(raw_lines)
+            frame_img = cls._draw_frame(raw_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img)
+            output = BytesIO()
+            frame_img.save(output, format="PNG")
+            output.seek(0)
+            return output, "image/png", "png"
 
-                elif cmd == "ellipse" and len(parts) >= 6:
-                    x0, y0, x1, y1 = map(int, parts[1:5])
-                    color = cls.parse_color(parts[5])
-                    # Handle true transparency alpha compositing to avoid overwrite artifacts
-                    if len(color) == 4 and color[3] < 255:
-                        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-                        overlay_draw = ImageDraw.Draw(overlay)
-                        overlay_draw.ellipse([x0, y0, x1, y1], fill=color)
-                        img = Image.alpha_composite(img, overlay)
-                        draw = ImageDraw.Draw(img) # Re-establish context
-                    else:
-                        draw.ellipse([x0, y0, x1, y1], fill=color)
+        # --- Animated path: split into a shared header + one or more per-frame blocks ---
+        segments: List[List[str]] = [[]]
+        for line in raw_lines:
+            if line.strip().lower() == cls.FRAME_SEPARATOR:
+                segments.append([])
+            else:
+                segments[-1].append(line)
 
-                elif cmd == "image" and len(parts) >= 5:
-                    x, y, w, h = map(int, parts[1:5])
-                    
-                    # Search all remaining arguments securely for any digit to use as blur
-                    blur_val = 0
-                    for p in parts[5:]:
-                        if p.isdigit():
-                            blur_val = min(max(int(p), 0), 100)
-                            break
+        header_lines = segments[0]
+        frame_blocks = segments[1:] if len(segments) > 1 else []
 
-                    resized_art = album_art_img.resize((w, h), Image.Resampling.LANCZOS)
-                    if blur_val > 0:
-                        resized_art = resized_art.filter(ImageFilter.GaussianBlur(blur_val))
-                    img.alpha_composite(resized_art, (x, y))
+        canvas_width, canvas_height, bg_color = cls._extract_canvas_size(header_lines)
+        delay_ms = cls._extract_delay(header_lines)
 
-                elif cmd == "blur" and len(parts) >= 2:
-                    radius = min(max(int(parts[1]), 1), 50)
-                    img = img.filter(ImageFilter.GaussianBlur(radius))
-                    draw = ImageDraw.Draw(img)
-
-                elif cmd == "text" and len(parts) >= 5:
-                    x, y = int(parts[1]), int(parts[2])
-                    
-                    color_idx = -1
-                    for idx, part in enumerate(parts[3:], start=3):
-                        if part.startswith("#"):
-                            color_idx = idx
-                            break
-                    
-                    if color_idx != -1:
-                        raw_text = " ".join(parts[3:color_idx])
-                        color = cls.parse_color(parts[color_idx])
-                        size = 18
-                        if len(parts) > color_idx + 1:
-                            try:
-                                size = min(max(int(parts[color_idx+1]), 8), 72)
-                            except ValueError:
-                                pass
-                    else:
-                        raw_text = parts[3]
-                        color = (255, 255, 255, 255)
-                        size = 18
-
-                    for key, val in replacements.items():
-                        raw_text = raw_text.replace(key, val)
-
-                    font = None
-                    for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 
-                                      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                      "Arial", "Helvetica"]:
-                        try:
-                            font = ImageFont.truetype(font_path, size)
-                            break
-                        except IOError:
-                            continue
-                    
-                    if not font:
-                        font = ImageFont.load_default()
-
-                    draw.text((x, y), raw_text, fill=color, font=font)
-
-            except Exception as parse_error:
-                logger.warning(f"Failed parsing custom style line [{line}]: {parse_error}")
+        rendered_frames = []
+        if frame_blocks:
+            for frame_lines in frame_blocks:
+                combined = header_lines + frame_lines
+                frame_img = cls._draw_frame(combined, (canvas_width, canvas_height), bg_color, replacements, album_art_img)
+                rendered_frames.append(frame_img.convert("RGB"))
+        else:
+            # Defensive fallback: a marker with nothing after it just renders the header once.
+            frame_img = cls._draw_frame(header_lines, (canvas_width, canvas_height), bg_color, replacements, album_art_img)
+            rendered_frames.append(frame_img.convert("RGB"))
 
         output = BytesIO()
-        img.save(output, format="PNG")
+        rendered_frames[0].save(
+            output,
+            format="GIF",
+            save_all=True,
+            append_images=rendered_frames[1:],
+            duration=delay_ms,
+            loop=0,
+            disposal=2,
+        )
         output.seek(0)
-        return output
+        return output, "image/gif", "gif"
 
 
 # --- Matrix Bot Main Logic ---
@@ -1023,14 +1328,18 @@ class BetterFMBot:
             await self.handle_set_style(room, event, body)
         elif cmd == CONFIG["CMD_HELP"]:
             await self.handle_help(room)
+        elif cmd == CONFIG["CMD_BWK"] or cmd == CONFIG["CMD_BWHOKNOWS"]:
+            await self.handle_bwk(room, event, parts)
+        elif cmd == CONFIG["CMD_WIKI"]:
+            await self.handle_wiki(room, event, parts, body)
 
-    async def upload_image_to_matrix(self, image_data: BytesIO, filename: str) -> Optional[str]:
-        """Uploads a PIL generated PNG binary onto Matrix media storage securely."""
+    async def upload_image_to_matrix(self, image_data: BytesIO, filename: str, mimetype: str = "image/png") -> Optional[str]:
+        """Uploads a PIL generated image binary (PNG or GIF) onto Matrix media storage securely."""
         try:
             logger.info(f"Starting upload for {filename} ({image_data.getbuffer().nbytes} bytes)...")
             resp = await self.client.upload(
                 image_data,
-                "image/png",
+                mimetype,
                 filename
             )
             logger.info(f"Upload completed. Server response: {resp}")
@@ -1061,9 +1370,11 @@ class BetterFMBot:
             f"- `{CONFIG['CMD_STATS']} [user] [daily/monthly/overall]` - Fetches playstats and top tracks.\n"
             f"- `{CONFIG['CMD_SETUSER']} <lastfm_username>` - Links your Matrix ID to your Last.fm account.\n"
             f"- `{CONFIG['CMD_SETSTYLE']} <preset>` - Switches your design theme.\n"
-            f"- `{CONFIG['CMD_SETSTYLE']} custom <directives>` - Saves a custom canvas design!\n"
+            f"- `{CONFIG['CMD_SETSTYLE']} custom <directives>` - Saves a custom canvas design (add `---FRAME---` blocks for your own looping GIF!).\n"
+            f"- `{CONFIG['CMD_BWK']} [artist]` (alias `{CONFIG['CMD_BWHOKNOWS']}`) - Who Knows leaderboard: ranks everyone registered with this bot by scrobbles of that artist over the last {WHOKNOWS_YEARS} years. Leave the artist blank to use your own #1 artist.\n"
+            f"- `{CONFIG['CMD_WIKI']} [artist] - [title]` - Looks up a short wiki entry for a track (falls back to the artist's bio). Leave blank to use your current/last track.\n"
             f"- `{CONFIG['CMD_HELP']}` - Shows this help menu.\n\n"
-            "**Available Presets:**\n"
+            "**Available Presets** (`_gif` presets are animated & loop):\n"
             f"`{', '.join(STYLE_PRESETS.keys())}`"
         )
         
@@ -1162,8 +1473,8 @@ class BetterFMBot:
                             except ValueError:
                                 pass
 
-            image_stream = await SecureRenderer.render_card(track_info, style_spec)
-            mxc_uri = await self.upload_image_to_matrix(image_stream, f"{target_lastfm}_fm.png")
+            image_stream, mimetype, ext = await SecureRenderer.render_card(track_info, style_spec)
+            mxc_uri = await self.upload_image_to_matrix(image_stream, f"{target_lastfm}_fm.{ext}", mimetype)
             
             if mxc_uri:
                 status_msg = "Currently playing:" if track_info["now_playing"] else "Last played track:"
@@ -1197,11 +1508,11 @@ class BetterFMBot:
                         "msgtype": "m.image",
                         "body": formatted_body,
                         "url": mxc_uri,
-                        "filename": f"{target_lastfm}_fm.png",
+                        "filename": f"{target_lastfm}_fm.{ext}",
                         "format": "org.matrix.custom.html",
                         "formatted_body": html_body,
                         "info": {
-                            "mimetype": "image/png",
+                            "mimetype": mimetype,
                             "w": card_width,
                             "h": card_height
                         }
@@ -1361,7 +1672,7 @@ class BetterFMBot:
                     "m.room.message",
                     {
                         "msgtype": "m.text",
-                        "body": "Error: Custom layout must start with a `canvas` directive setup."
+                        "body": "Error: Custom layout must start with a `canvas` directive setup. (Add one or more `---FRAME---` lines to make it an animated GIF.)"
                     }
                 )
                 return
@@ -1384,6 +1695,195 @@ class BetterFMBot:
                     "body": f"Unknown style preset '{option}'. Standard choices are: {', '.join(STYLE_PRESETS.keys())}"
                 }
             )
+
+    async def handle_bwk(self, room: MatrixRoom, event: RoomMessageText, parts: list):
+        """
+        !bwk / !bwhoknows [artist] - Leaderboard of everyone registered with this bot,
+        ranked by how many times each of them has scrobbled the given artist over the
+        last WHOKNOWS_YEARS years. If no artist is given, defaults to the caller's own
+        all-time #1 artist. Ties are broken in the caller's favor (their "highest valid
+        spot"), and the caller's own rank is always shown even if they land outside the
+        top 10.
+        """
+        sender = event.sender
+        caller_lastfm = get_user_lastfm(sender)
+        if not caller_lastfm:
+            await self.client.room_send(
+                room.room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": f"You need to register first: {CONFIG['CMD_SETUSER']} <lastfm_username>"
+                }
+            )
+            return
+
+        if len(parts) > 1:
+            artist_query = " ".join(parts[1:]).strip()
+        else:
+            artist_query = await self.lastfm.get_top_artist(caller_lastfm)
+            if not artist_query:
+                await self.client.room_send(
+                    room.room_id,
+                    "m.room.message",
+                    {
+                        "msgtype": "m.text",
+                        "body": f"Couldn't determine your top artist. Try: {CONFIG['CMD_BWK']} <artist name>"
+                    }
+                )
+                return
+
+        await self.client.room_typing(room.room_id, True)
+        try:
+            db = load_db()
+            users = db.get("users", {})
+
+            # De-duplicate by Last.fm username, in case multiple Matrix IDs are bound to the same account.
+            seen_lastfm: Dict[str, str] = {}
+            for matrix_id, info in users.items():
+                lfm = info.get("lastfm")
+                if lfm and lfm not in seen_lastfm:
+                    seen_lastfm[lfm] = matrix_id
+
+            # Make sure the caller is always included, even if their own DB entry is somehow missing.
+            if caller_lastfm not in seen_lastfm:
+                seen_lastfm[caller_lastfm] = sender
+
+            if not seen_lastfm:
+                await self.client.room_send(
+                    room.room_id,
+                    "m.room.message",
+                    {"msgtype": "m.text", "body": "No users are registered with this bot yet."}
+                )
+                return
+
+            since_ts = int(time.time()) - (WHOKNOWS_YEARS * 365 * 24 * 3600)
+            lastfm_names = list(seen_lastfm.keys())
+
+            results = await asyncio.gather(
+                *[self.lastfm.get_artist_playcount(name, artist_query, since_ts) for name in lastfm_names],
+                return_exceptions=True
+            )
+
+            leaderboard = []
+            for lfm_name, count in zip(lastfm_names, results):
+                if isinstance(count, Exception):
+                    logger.warning(f"Failed fetching playcount for {lfm_name}: {count}")
+                    count = 0
+                leaderboard.append({
+                    "lastfm": lfm_name,
+                    "plays": count,
+                    "is_caller": lfm_name == caller_lastfm,
+                })
+
+            # Sort by playcount, descending. Ties go to the caller first - their "highest valid spot".
+            leaderboard.sort(key=lambda e: (-e["plays"], not e["is_caller"]))
+
+            caller_rank = next((i + 1 for i, e in enumerate(leaderboard) if e["is_caller"]), None)
+            caller_entry = next((e for e in leaderboard if e["is_caller"]), None)
+
+            medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+            lines = [f"🏆 **Who Knows \"{artist_query}\"** (last {WHOKNOWS_YEARS} years)"]
+
+            ranked = [e for e in leaderboard if e["plays"] > 0]
+            top10 = ranked[:10]
+
+            if not top10:
+                lines.append(f"Nobody registered with this bot has scrobbled **{artist_query}** in that window.")
+            else:
+                for idx, entry in enumerate(top10, start=1):
+                    prefix = medals.get(idx, f"{idx}.")
+                    you_tag = " (you)" if entry["is_caller"] else ""
+                    lines.append(f"{prefix} **{entry['lastfm']}**{you_tag} — {entry['plays']} plays")
+
+                if caller_entry and caller_entry not in top10:
+                    lines.append("…")
+                    lines.append(f"#{caller_rank}. **{caller_entry['lastfm']}** (you) — {caller_entry['plays']} plays")
+
+            msg = "\n".join(lines)
+            await self.client.room_send(
+                room.room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": msg.replace("**", ""),
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": msg.replace("\n", "<br>")
+                }
+            )
+        finally:
+            await self.client.room_typing(room.room_id, False)
+
+    async def handle_wiki(self, room: MatrixRoom, event: RoomMessageText, parts: list, body: str):
+        """
+        !wiki [artist] - [title] - Looks up a wiki entry for a track. Falls back to the
+        artist's biography if the track itself has no wiki. With no arguments, uses the
+        caller's current (or most recent) track.
+        """
+        sender = event.sender
+        artist_query = None
+        title_query = None
+
+        if len(parts) > 1:
+            # Re-slice from the raw message body so multi-word artist/title names survive intact.
+            raw_query = body[len(parts[0]):].strip()
+            if " - " in raw_query:
+                artist_query, title_query = [p.strip() for p in raw_query.split(" - ", 1)]
+            else:
+                artist_query = raw_query
+        else:
+            caller_lastfm = get_user_lastfm(sender)
+            if not caller_lastfm:
+                await self.client.room_send(
+                    room.room_id,
+                    "m.room.message",
+                    {
+                        "msgtype": "m.text",
+                        "body": f"Usage: {CONFIG['CMD_WIKI']} <artist> - <title>  (or register with {CONFIG['CMD_SETUSER']} and leave it blank to use your current track)"
+                    }
+                )
+                return
+
+            now_playing = await self.lastfm.get_now_playing(caller_lastfm)
+            if not now_playing:
+                await self.client.room_send(
+                    room.room_id,
+                    "m.room.message",
+                    {"msgtype": "m.text", "body": "Couldn't find a current or recent track to look up."}
+                )
+                return
+            artist_query = now_playing["artist"]
+            title_query = now_playing["title"]
+
+        await self.client.room_typing(room.room_id, True)
+        try:
+            wiki = await self.lastfm.get_wiki(artist_query, title_query)
+            if not wiki:
+                lookup_desc = f"{artist_query} - {title_query}" if title_query else artist_query
+                await self.client.room_send(
+                    room.room_id,
+                    "m.room.message",
+                    {"msgtype": "m.text", "body": f"No wiki entry found for {lookup_desc}."}
+                )
+                return
+
+            clean_text = clean_wiki_text(wiki["text"])
+            msg = f"📖 **{wiki['subject']}**\n\n{clean_text}"
+            if wiki.get("url"):
+                msg += f"\n\n🔗 {wiki['url']}"
+
+            await self.client.room_send(
+                room.room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": msg.replace("**", ""),
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": msg.replace("\n", "<br>")
+                }
+            )
+        finally:
+            await self.client.room_typing(room.room_id, False)
 
 
 if __name__ == "__main__":
