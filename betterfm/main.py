@@ -984,26 +984,30 @@ def _build_animated_style_presets() -> Dict[str, str]:
     presets["vinyl_spin_gif"] = vinyl_header + "".join(f"---FRAME---\n{f}" for f in spin_frames)
 
     # --- Bouncing equalizer bars, higher framerate (12 bars-frames at 50ms) ---
-    eq_header = (
-        "canvas 1000 260 #0d0d12\n"
-        "delay 50\n"
-        "rect 20 20 200 200 #1a1a22\n"
-        "image 20 20 200 200 {album_art}\n"
-        "text 240 40 {artist} #ffffff 24 bold\n"
-        "text 240 78 {title} #ff5fa2 19 bold\n"
-        "text 240 112 {album} #9aa0aa 14 italic\n"
-        "text 240 220 {activity} #7d8590 12\n"
-    )
-    bar_x_positions = [240, 268, 296, 324, 352]
-    n_frames = 12
+    start_x = 240
+    total_width = 720  # Total horizontal space available (e.g., up to x = 960)
+    num_bars = 16      # Total number of bars you want
+    bar_width = 14     # Width of each bar
+
+    # Calculate total gap space and the distance between the start of each bar
+    available_space = total_width - (num_bars * bar_width)
+    spacing = available_space / (num_bars - 1) if num_bars > 1 else 0
+
+    bar_x_positions = [int(start_x + i * (bar_width + spacing)) for i in range(num_bars)]
+
+    n_frames = 250
     eq_frames = []
+
     for f in range(n_frames):
         bar_lines = ""
         for i, x in enumerate(bar_x_positions):
             height = int(15 + 48 * abs(math.sin((f / n_frames) * 2 * math.pi + i * 0.8)))
             y0 = 200 - height
-            bar_lines += f"rect {x} {y0} {x + 18} 200 #ff5fa2\n"
+            # Note: Based on your original code, the 3rd argument in rect looks like width/x2. 
+            # If it expects width, use bar_width. If it expects right-edge coordinate, use x + bar_width.
+            bar_lines += f"rect {x} {y0} {bar_width} 200 #ff5fa2\n"
         eq_frames.append(bar_lines)
+
     presets["equalizer_gif"] = eq_header + "".join(f"---FRAME---\n{f}" for f in eq_frames)
 
     # --- Neon ring: breathing double halo with cycling colours around centred art ---
